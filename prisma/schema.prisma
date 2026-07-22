@@ -1,0 +1,291 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AuthProvider {
+  PHONE
+  GOOGLE
+}
+
+enum VerificationStatus {
+  PENDING
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum IdDocumentType {
+  PAN
+  AADHAAR
+  DRIVING_LICENCE
+  PASSPORT
+}
+
+enum DietaryPreference {
+  VEGETARIAN
+  NON_VEGETARIAN
+  VEGAN
+}
+
+enum BookingType {
+  SOLO
+  GROUP
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+  ATTENDED
+  NO_SHOW
+}
+
+enum TableStatus {
+  OPEN
+  MATCHING
+  AWAITING_REVIEW
+  APPROVED
+  REVEALED
+  COMPLETED
+  CANCELLED
+}
+
+enum PriceTier {
+  DAYTIME
+  EVENING
+}
+
+enum GenderPreference {
+  BALANCED
+  WOMEN_ONLY
+}
+
+model User {
+  id                 String             @id @default(cuid())
+  phone              String?            @unique
+  googleId           String?            @unique
+  email              String?            @unique
+  authProvider       AuthProvider
+  fullName           String
+  dateOfBirth        DateTime
+  isAgeVerified      Boolean            @default(false)
+  verificationStatus VerificationStatus @default(PENDING)
+  attendanceCount    Int                @default(0)
+  currentStreak      Int                @default(0)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  profile            CompatibilityProfile?
+  identityChecks     IdentityVerification[]
+  bookings           Booking[]
+  groupMemberships   BookingGroupMember[]
+  tableMemberships   TableMember[]
+  chatMessages       ChatMessage[]
+  connectionSignals  ConnectionSignal[]     @relation("FromUser")
+  receivedSignals    ConnectionSignal[]     @relation("ToUser")
+  badges             UserBadge[]
+
+  @@map("users")
+}
+
+model IdentityVerification {
+  id           String             @id @default(cuid())
+  userId       String
+  documentType IdDocumentType
+  documentUrl  String
+  selfieUrl    String
+  status       VerificationStatus @default(SUBMITTED)
+  reviewedAt   DateTime?
+  notes        String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("identity_verifications")
+}
+
+model CompatibilityProfile {
+  id                 String            @id @default(cuid())
+  userId             String            @unique
+  energyLevel        Int
+  humorStyle         Int
+  conversationDepth  Int
+  opennessToNew      Int
+  adventurousness    Int
+  dietaryPreference  DietaryPreference
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("compatibility_profiles")
+}
+
+model Venue {
+  id          String   @id @default(cuid())
+  name        String
+  address     String
+  city        String
+  lat         Float?
+  lng         Float?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  menus  VenueMenu[]
+  tables SupperTable[]
+
+  @@map("venues")
+}
+
+model VenueMenu {
+  id           String            @id @default(cuid())
+  venueId      String
+  name         String
+  description  String?
+  dietaryType  DietaryPreference
+  costPerHead  Int
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  venue  Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  tables SupperTable[]
+
+  @@map("venue_menus")
+}
+
+/// A scheduled table night (up to 6 seats).
+model SupperTable {
+  id                String           @id @default(cuid())
+  venueId           String
+  menuId            String?
+  startsAt          DateTime
+  priceTier         PriceTier
+  seatPrice         Int
+  status            TableStatus      @default(OPEN)
+  genderPreference  GenderPreference @default(BALANCED)
+  capacity          Int              @default(6)
+  reviewedBy        String?
+  reviewedAt        DateTime?
+  revealedAt        DateTime?
+  icebreakers       String[]
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  venue    Venue           @relation(fields: [venueId], references: [id])
+  menu     VenueMenu?      @relation(fields: [menuId], references: [id])
+  bookings Booking[]
+  members  TableMember[]
+  messages ChatMessage[]
+
+  @@map("supper_tables")
+}
+
+model Booking {
+  id              String        @id @default(cuid())
+  userId          String
+  tableId         String
+  bookingType     BookingType   @default(SOLO)
+  status          BookingStatus @default(PENDING_PAYMENT)
+  seatsBooked     Int           @default(1)
+  amountPaid      Int?
+  paidAt          DateTime?
+  paymentRef      String?
+  cancelledAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  user    User                 @relation(fields: [userId], references: [id])
+  table   SupperTable          @relation(fields: [tableId], references: [id])
+  members BookingGroupMember[]
+
+  @@map("bookings")
+}
+
+model BookingGroupMember {
+  id        String   @id @default(cuid())
+  bookingId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([bookingId, userId])
+  @@map("booking_group_members")
+}
+
+model TableMember {
+  id                 String   @id @default(cuid())
+  tableId            String
+  userId             String
+  oneLineDescription String?
+  attended           Boolean  @default(false)
+  attendedAt         DateTime?
+  createdAt          DateTime @default(now())
+
+  table SupperTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  user  User        @relation(fields: [userId], references: [id])
+
+  @@unique([tableId, userId])
+  @@map("table_members")
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  tableId   String
+  senderId  String
+  body      String
+  createdAt DateTime @default(now())
+
+  table  SupperTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  sender User        @relation(fields: [senderId], references: [id])
+
+  @@map("chat_messages")
+}
+
+/// One-way private interest. Connection only if mutual.
+model ConnectionSignal {
+  id         String   @id @default(cuid())
+  fromUserId String
+  toUserId   String
+  tableId    String
+  createdAt  DateTime @default(now())
+
+  fromUser User @relation("FromUser", fields: [fromUserId], references: [id])
+  toUser   User @relation("ToUser", fields: [toUserId], references: [id])
+
+  @@unique([fromUserId, toUserId, tableId])
+  @@map("connection_signals")
+}
+
+model Badge {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String
+  createdAt   DateTime @default(now())
+
+  users UserBadge[]
+
+  @@map("badges")
+}
+
+model UserBadge {
+  id       String   @id @default(cuid())
+  userId   String
+  badgeId  String
+  earnedAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge Badge @relation(fields: [badgeId], references: [id])
+
+  @@unique([userId, badgeId])
+  @@map("user_badges")
+}
