@@ -4,6 +4,10 @@ import helmet from "helmet";
 import morgan from "morgan";
 import { env } from "./config/env";
 import { healthRouter } from "./routes/health";
+import { authRouter } from "./routes/auth";
+import { tablesRouter } from "./routes/tables";
+import { bookingsRouter } from "./routes/bookings";
+import { verificationRouter } from "./routes/verification";
 import { errorHandler } from "./middleware/errorHandler";
 import { notFound } from "./middleware/notFound";
 
@@ -16,17 +20,10 @@ export function createApp() {
   app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
 
   app.use("/health", healthRouter);
-
-  // Feature routes land here one by one:
-  // app.use("/auth", authRouter);
-  // app.use("/verification", verificationRouter);
-  // app.use("/profile", profileRouter);
-  // app.use("/tables", tablesRouter);
-  // app.use("/bookings", bookingsRouter);
-  // app.use("/matches", matchesRouter);
-  // app.use("/chat", chatRouter);
-  // app.use("/venues", venuesRouter);
-  // app.use("/operator", operatorRouter);
+  app.use("/auth", authRouter);
+  app.use("/tables", tablesRouter);
+  app.use("/bookings", bookingsRouter);
+  app.use("/verification", verificationRouter);
 
   app.use(notFound);
   app.use(errorHandler);
