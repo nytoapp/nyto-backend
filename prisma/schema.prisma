@@ -10,6 +10,7 @@ datasource db {
 enum AuthProvider {
   PHONE
   GOOGLE
+  EMAIL
 }
 
 enum VerificationStatus {
@@ -71,8 +72,11 @@ model User {
   googleId           String?            @unique
   email              String?            @unique
   authProvider       AuthProvider
-  fullName           String
-  dateOfBirth        DateTime
+  firstName          String?
+  fullName           String             @default("")
+  dateOfBirth        DateTime?
+  gender             String?
+  interests          String[]           @default([])
   isAgeVerified      Boolean            @default(false)
   verificationStatus VerificationStatus @default(PENDING)
   attendanceCount    Int                @default(0)

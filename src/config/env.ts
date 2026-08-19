@@ -9,6 +9,16 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1).optional(),
   JWT_SECRET: z.string().min(1).default("dev-secret-change-me"),
   CORS_ORIGIN: z.string().default("*"),
+  // Google Sign-In: Web OAuth client ID(s), comma-separated.
+  GOOGLE_CLIENT_IDS: z
+    .string()
+    .default("")
+    .transform((value) =>
+      value
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
 });
 
 export const env = envSchema.parse(process.env);
