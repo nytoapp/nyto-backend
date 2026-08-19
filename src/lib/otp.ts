@@ -11,19 +11,23 @@ export function normalizePhone(phone: string): string {
   return phone.replace(/\D/g, "");
 }
 
-export function issueOtp(phone: string): string {
-  const key = normalizePhone(phone);
-  // Fixed stub OTP in development so Flutter / Postman can verify easily.
-  const code = process.env.NODE_ENV === "production"
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function issueCode(): string {
+  return process.env.NODE_ENV === "production"
     ? String(Math.floor(100000 + Math.random() * 900000))
     : "000000";
+}
 
+export function issueOtp(key: string): string {
+  const code = issueCode();
   store.set(key, { code, expiresAt: Date.now() + OTP_TTL_MS });
   return code;
 }
 
-export function verifyOtp(phone: string, code: string): boolean {
-  const key = normalizePhone(phone);
+export function verifyOtp(key: string, code: string): boolean {
   const entry = store.get(key);
   if (!entry) return false;
   if (Date.now() > entry.expiresAt) {

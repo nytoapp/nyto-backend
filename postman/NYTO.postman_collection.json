@@ -1,0 +1,138 @@
+{
+  "info": {
+    "name": "NYTO API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Local NYTO backend. Dev OTP is always 000000. After Email OTP verify, copy token into collection variable jwt."
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:3000" },
+    { "key": "jwt", "value": "" },
+    { "key": "tableId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/health"
+      }
+    },
+    {
+      "name": "Auth — email OTP request",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"you@gmail.com\"\n}"
+        },
+        "url": "{{baseUrl}}/auth/email/otp/request"
+      }
+    },
+    {
+      "name": "Auth — email OTP verify",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.token) pm.collectionVariables.set('jwt', json.token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"you@gmail.com\",\n  \"code\": \"000000\"\n}"
+        },
+        "url": "{{baseUrl}}/auth/email/otp/verify"
+      }
+    },
+    {
+      "name": "Auth — Google",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.token) pm.collectionVariables.set('jwt', json.token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"idToken\": \"paste-id-token-from-google-sign-in\"\n}"
+        },
+        "url": "{{baseUrl}}/auth/google"
+      }
+    },
+    {
+      "name": "Auth — me",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{jwt}}" }],
+        "url": "{{baseUrl}}/auth/me"
+      }
+    },
+    {
+      "name": "Auth — update profile",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{jwt}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"firstName\": \"Priya\",\n  \"gender\": \"woman\",\n  \"phone\": \"9876543210\",\n  \"interests\": [\"food\", \"music\"]\n}"
+        },
+        "url": "{{baseUrl}}/auth/me"
+      }
+    },
+    {
+      "name": "Tables — this week",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.tables && json.tables[0]) pm.collectionVariables.set('tableId', json.tables[0].id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/tables?filter=this_week"
+      }
+    },
+    {
+      "name": "Bookings — create",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{jwt}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"tableId\": \"{{tableId}}\",\n  \"bookingType\": \"SOLO\",\n  \"seatsBooked\": 1\n}"
+        },
+        "url": "{{baseUrl}}/bookings"
+      }
+    }
+  ]
+}
