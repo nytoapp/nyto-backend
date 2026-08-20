@@ -101,6 +101,14 @@
       }
     },
     {
+      "name": "Auth — delete me",
+      "request": {
+        "method": "DELETE",
+        "header": [{ "key": "Authorization", "value": "Bearer {{jwt}}" }],
+        "url": "{{baseUrl}}/auth/me"
+      }
+    },
+    {
       "name": "Tables — this week",
       "event": [
         {

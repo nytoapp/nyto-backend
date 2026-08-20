@@ -9,6 +9,15 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1).optional(),
   JWT_SECRET: z.string().min(1).default("dev-secret-change-me"),
   CORS_ORIGIN: z.string().default("*"),
+  RESEND_API_KEY: z
+    .string()
+    .optional()
+    .transform((value) => (value && value.trim() ? value.trim() : undefined)),
+  RESEND_FROM_EMAIL: z
+    .string()
+    .optional()
+    .transform((value) => (value && value.trim() ? value.trim() : undefined))
+    .pipe(z.string().email().optional()),
   // Google Sign-In: Web OAuth client ID(s), comma-separated.
   GOOGLE_CLIENT_IDS: z
     .string()

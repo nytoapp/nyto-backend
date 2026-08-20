@@ -21,9 +21,17 @@ function issueCode(): string {
     : "000000";
 }
 
+export function generateOtpCode(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+export function storeOtp(key: string, code: string): void {
+  store.set(key, { code, expiresAt: Date.now() + OTP_TTL_MS });
+}
+
 export function issueOtp(key: string): string {
   const code = issueCode();
-  store.set(key, { code, expiresAt: Date.now() + OTP_TTL_MS });
+  storeOtp(key, code);
   return code;
 }
 

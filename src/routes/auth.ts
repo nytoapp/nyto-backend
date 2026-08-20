@@ -3,11 +3,15 @@ import { AuthProvider } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import {
+  generateOtpCode,
   issueOtp,
   normalizeEmail,
   normalizePhone,
+  storeOtp,
   verifyOtp,
 } from "../lib/otp";
+import { env } from "../config/env";
+import { sendEmailOtp } from "../lib/email";
 import { verifyGoogleIdToken } from "../lib/google";
 import { requireAuth, signToken, type AuthedRequest } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
@@ -83,7 +87,8 @@ function ageFromDob(dob: Date): number {
 }
 
 function otpDevPayload(code: string) {
-  return process.env.NODE_ENV !== "production" ? { devOtp: code } : {};
+  const showDevOtp = process.env.NODE_ENV !== "production" && !env.RESEND_API_KEY;
+  return showDevOtp ? { devOtp: code } : {};
 }
 
 function publicUser(user: {
@@ -182,8 +187,14 @@ authRouter.post(
     try {
       const { email } = req.body as z.infer<typeof emailOtpRequestSchema>;
       const normalized = normalizeEmail(email);
-      const code = issueOtp(`email:${normalized}`);
+      const key = `email:${normalized}`;
+      const code = env.RESEND_API_KEY ? generateOtpCode() : issueOtp(key);
+      if (env.RESEND_API_KEY) {
+        storeOtp(key, code);
+      }
       console.log(`[otp] ${normalized} → ${code}`);
+
+      await sendEmailOtp(normalized, code);
 
       res.json({
         ok: true,
@@ -397,6 +408,28 @@ authRouter.get("/me", requireAuth, async (req: AuthedRequest, res, next) => {
     const user = await prisma.user.findUnique({ where: { id: req.userId } });
     if (!user) throw new AppError("User not found", 404);
     res.json({ ok: true, user: publicUser(user) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+authRouter.delete("/me", requireAuth, async (req: AuthedRequest, res, next) => {
+  try {
+    const userId = req.userId;
+    if (!userId) throw new AppError("Unauthorized", 401);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.connectionSignal.deleteMany({
+        where: { OR: [{ fromUserId: userId }, { toUserId: userId }] },
+      });
+      await tx.chatMessage.deleteMany({ where: { senderId: userId } });
+      await tx.tableMember.deleteMany({ where: { userId } });
+      await tx.bookingGroupMember.deleteMany({ where: { userId } });
+      await tx.booking.deleteMany({ where: { userId } });
+      await tx.user.delete({ where: { id: userId } });
+    });
+
+    res.json({ ok: true, deleted: true });
   } catch (err) {
     next(err);
   }
