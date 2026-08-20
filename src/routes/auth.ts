@@ -54,6 +54,9 @@ const profileSchema = z.object({
   phone: z.string().min(8).max(20).optional(),
   gender: z.enum(["man", "woman", "nonbinary", "skip"]).optional(),
   dateOfBirth: z.string().min(1).optional(),
+  socialEnergy: z
+    .enum(["introverted", "ambiverted", "extroverted"])
+    .optional(),
   interests: z.array(z.string().trim().min(1)).max(20).optional(),
 });
 
@@ -99,6 +102,7 @@ function publicUser(user: {
   fullName: string;
   dateOfBirth: Date | null;
   gender: string | null;
+  socialEnergy: string | null;
   interests: string[];
   verificationStatus: string;
   attendanceCount: number;
@@ -116,6 +120,7 @@ function publicUser(user: {
       ? user.dateOfBirth.toISOString().slice(0, 10)
       : null,
     gender: user.gender,
+    socialEnergy: user.socialEnergy,
     interests: user.interests,
     verificationStatus: user.verificationStatus,
     isAgeVerified: user.isAgeVerified,
@@ -259,6 +264,7 @@ authRouter.patch(
         gender?: string;
         dateOfBirth?: Date;
         isAgeVerified?: boolean;
+        socialEnergy?: string;
         interests?: string[];
       } = {};
 
@@ -268,6 +274,7 @@ authRouter.patch(
       }
       if (body.phone) data.phone = normalizePhone(body.phone);
       if (body.gender) data.gender = body.gender;
+      if (body.socialEnergy) data.socialEnergy = body.socialEnergy;
       if (body.interests) data.interests = body.interests;
       if (body.dateOfBirth) {
         const dob = parseDob(body.dateOfBirth);

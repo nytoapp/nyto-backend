@@ -76,6 +76,8 @@ model User {
   fullName           String             @default("")
   dateOfBirth        DateTime?
   gender             String?
+  /// introverted | ambiverted | extroverted
+  socialEnergy       String?
   interests          String[]           @default([])
   isAgeVerified      Boolean            @default(false)
   verificationStatus VerificationStatus @default(PENDING)
