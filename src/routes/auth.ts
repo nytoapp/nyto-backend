@@ -430,6 +430,13 @@ authRouter.delete("/me", requireAuth, async (req: AuthedRequest, res, next) => {
         where: { OR: [{ fromUserId: userId }, { toUserId: userId }] },
       });
       await tx.chatMessage.deleteMany({ where: { senderId: userId } });
+      await tx.directMessage.deleteMany({ where: { senderId: userId } });
+      await tx.directThread.deleteMany({
+        where: { OR: [{ userLowId: userId }, { userHighId: userId }] },
+      });
+      await tx.userBlock.deleteMany({
+        where: { OR: [{ blockerId: userId }, { blockedId: userId }] },
+      });
       await tx.tableMember.deleteMany({ where: { userId } });
       await tx.bookingGroupMember.deleteMany({ where: { userId } });
       await tx.booking.deleteMany({ where: { userId } });

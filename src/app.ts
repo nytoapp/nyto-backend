@@ -8,6 +8,8 @@ import { authRouter } from "./routes/auth";
 import { tablesRouter } from "./routes/tables";
 import { bookingsRouter } from "./routes/bookings";
 import { verificationRouter } from "./routes/verification";
+import { chatRouter } from "./routes/chat";
+import { directRouter } from "./routes/direct";
 import { errorHandler } from "./middleware/errorHandler";
 import { notFound } from "./middleware/notFound";
 
@@ -24,6 +26,8 @@ export function createApp() {
   app.use("/tables", tablesRouter);
   app.use("/bookings", bookingsRouter);
   app.use("/verification", verificationRouter);
+  app.use("/chat", chatRouter);
+  app.use("/chat", directRouter);
 
   app.use(notFound);
   app.use(errorHandler);

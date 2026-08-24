@@ -66,6 +66,12 @@ enum GenderPreference {
   WOMEN_ONLY
 }
 
+enum DirectThreadStatus {
+  PENDING
+  ACTIVE
+  DECLINED
+}
+
 model User {
   id                 String             @id @default(cuid())
   phone              String?            @unique
@@ -92,6 +98,11 @@ model User {
   groupMemberships   BookingGroupMember[]
   tableMemberships   TableMember[]
   chatMessages       ChatMessage[]
+  dmLow              DirectThread[]         @relation("DmLow")
+  dmHigh             DirectThread[]         @relation("DmHigh")
+  dmMessages         DirectMessage[]
+  blocks             UserBlock[]            @relation("Blocker")
+  blockedBy          UserBlock[]            @relation("Blocked")
   connectionSignals  ConnectionSignal[]     @relation("FromUser")
   receivedSignals    ConnectionSignal[]     @relation("ToUser")
   badges             UserBadge[]
@@ -244,16 +255,69 @@ model TableMember {
 }
 
 model ChatMessage {
-  id        String   @id @default(cuid())
-  tableId   String
-  senderId  String
-  body      String
-  createdAt DateTime @default(now())
+  id               String   @id @default(cuid())
+  tableId          String
+  senderId         String
+  body             String
+  /// Client-generated id for send idempotency (optional).
+  clientMessageId  String?
+  createdAt        DateTime @default(now())
 
   table  SupperTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
   sender User        @relation(fields: [senderId], references: [id])
 
+  @@index([tableId, createdAt])
+  @@index([tableId, clientMessageId])
   @@map("chat_messages")
+}
+
+/// 1-to-1 thread. PENDING = message request until the other person accepts or replies.
+model DirectThread {
+  id            String              @id @default(cuid())
+  userLowId     String
+  userHighId    String
+  initiatedById String
+  status        DirectThreadStatus  @default(PENDING)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  userLow  User            @relation("DmLow", fields: [userLowId], references: [id], onDelete: Cascade)
+  userHigh User            @relation("DmHigh", fields: [userHighId], references: [id], onDelete: Cascade)
+  messages DirectMessage[]
+
+  @@unique([userLowId, userHighId])
+  @@index([userLowId, status])
+  @@index([userHighId, status])
+  @@map("direct_threads")
+}
+
+model DirectMessage {
+  id              String   @id @default(cuid())
+  threadId        String
+  senderId        String
+  body            String
+  clientMessageId String?
+  createdAt       DateTime @default(now())
+
+  thread DirectThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+  @@index([threadId, clientMessageId])
+  @@map("direct_messages")
+}
+
+model UserBlock {
+  id        String   @id @default(cuid())
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@map("user_blocks")
 }
 
 /// One-way private interest. Connection only if mutual.
