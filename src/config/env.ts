@@ -28,6 +28,10 @@ const envSchema = z.object({
         .map((id) => id.trim())
         .filter(Boolean),
     ),
+  /** Hours after table starts that the dinner is considered "in progress". */
+  TABLE_EVENT_DURATION_HOURS: z.coerce.number().min(1).default(4),
+  /** Hours after the event ends before table group chat becomes read-only. */
+  TABLE_CHAT_GRACE_PERIOD_HOURS: z.coerce.number().min(0).default(72),
 });
 
 export const env = envSchema.parse(process.env);
