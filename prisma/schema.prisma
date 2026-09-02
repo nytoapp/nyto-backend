@@ -11,6 +11,13 @@ enum AuthProvider {
   PHONE
   GOOGLE
   EMAIL
+  APPLE
+  FACEBOOK
+}
+
+enum OtpChannel {
+  SMS
+  EMAIL
 }
 
 enum VerificationStatus {
@@ -76,6 +83,8 @@ model User {
   id                 String             @id @default(cuid())
   phone              String?            @unique
   googleId           String?            @unique
+  appleId            String?            @unique
+  facebookId         String?            @unique
   email              String?            @unique
   authProvider       AuthProvider
   firstName          String?
@@ -106,8 +115,50 @@ model User {
   connectionSignals  ConnectionSignal[]     @relation("FromUser")
   receivedSignals    ConnectionSignal[]     @relation("ToUser")
   badges             UserBadge[]
+  authSessions       AuthSession[]
 
   @@map("users")
+}
+
+/// Short-lived one-time code. The code itself is never stored — only a keyed hash.
+model OtpChallenge {
+  id          String     @id @default(cuid())
+  channel     OtpChannel
+  /// E.164 phone or normalized email.
+  destination String
+  codeHash    String
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  /// Number of times a code was delivered for this challenge (initial send + resends).
+  sendCount   Int        @default(1)
+  expiresAt   DateTime
+  lastSentAt  DateTime   @default(now())
+  consumedAt  DateTime?
+  createdAt   DateTime   @default(now())
+
+  @@index([channel, destination, createdAt])
+  @@index([expiresAt])
+  @@map("otp_challenges")
+}
+
+/// Refresh-token session. Rotated on every refresh; only a hash is persisted.
+model AuthSession {
+  id               String    @id @default(cuid())
+  userId           String
+  refreshTokenHash String    @unique
+  expiresAt        DateTime
+  lastUsedAt       DateTime  @default(now())
+  revokedAt        DateTime?
+  /// Set when this session was rotated, pointing at its replacement.
+  replacedById     String?
+  userAgent        String?
+  createdAt        DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("auth_sessions")
 }
 
 model IdentityVerification {

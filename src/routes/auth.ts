@@ -1,211 +1,187 @@
-import { Router } from "express";
-import { AuthProvider } from "@prisma/client";
+import { Router, type Request, type Response } from "express";
+import { OtpChannel } from "@prisma/client";
 import { z } from "zod";
-import { prisma } from "../lib/prisma";
-import {
-  generateOtpCode,
-  issueOtp,
-  normalizeEmail,
-  normalizePhone,
-  storeOtp,
-  verifyOtp,
-} from "../lib/otp";
 import { env } from "../config/env";
+import { prisma } from "../lib/prisma";
 import { sendEmailOtp } from "../lib/email";
+import { verifyAppleIdToken } from "../lib/apple";
+import { verifyFacebookAccessToken } from "../lib/facebook";
 import { verifyGoogleIdToken } from "../lib/google";
-import { requireAuth, signToken, type AuthedRequest } from "../middleware/auth";
+import {
+  ageFromDob,
+  findOrCreateAppleUser,
+  findOrCreateEmailUser,
+  findOrCreateFacebookUser,
+  findOrCreateGoogleUser,
+  findOrCreatePhoneUser,
+  parseDob,
+  publicUser,
+} from "../lib/identity";
+import { consumeOtpChallenge, issueOtpChallenge, normalizeEmail } from "../lib/otp";
+import { maskEmail, maskPhone, normalizePhoneNumber } from "../lib/phone";
+import { sendOtpSms } from "../lib/sms";
+import {
+  issueSession,
+  revokeSessionByRefreshToken,
+  rotateSession,
+  touchSession,
+} from "../lib/tokens";
+import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
+import {
+  authProviderLimiter,
+  otpRequestLimiter,
+  otpVerifyLimiter,
+} from "../middleware/rateLimit";
 import { validateBody } from "../middleware/validate";
 
 export const authRouter = Router();
 
+// ── Schemas ───────────────────────────────────────────────────────────────
+
 const emailSchema = z.string().trim().toLowerCase().email("Valid email required");
+const otpCodeSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{4,8}$/, "Enter the code from your message");
 
-const emailOtpRequestSchema = z.object({
-  email: emailSchema,
-});
-
+const emailOtpRequestSchema = z.object({ email: emailSchema });
 const emailOtpVerifySchema = z.object({
   email: emailSchema,
-  code: z.string().min(4, "OTP code is required"),
+  code: otpCodeSchema,
 });
 
-const googleAuthSchema = z.object({
-  idToken: z.string().min(20, "Google ID token is required"),
+const phoneSchema = z
+  .string()
+  .trim()
+  .min(8, "Phone number is required")
+  .max(20, "Phone number is too long");
+
+const phoneOtpRequestSchema = z.object({ phone: phoneSchema });
+const phoneOtpVerifySchema = z.object({
+  phone: phoneSchema,
+  code: otpCodeSchema,
 });
 
-const registerSchema = z.object({
-  fullName: z.string().trim().min(2, "Full name is required"),
-  dateOfBirth: z.string().min(1, "Date of birth is required"),
-  phone: z.string().min(10, "Phone number is required"),
+const idTokenSchema = z.object({
+  idToken: z.string().min(20, "Provider token is required"),
 });
-
-const otpRequestSchema = z.object({
-  phone: z.string().min(10, "Phone number is required"),
+const facebookAuthSchema = z.object({
+  accessToken: z.string().min(20, "Facebook access token is required"),
 });
-
-const otpVerifySchema = z.object({
-  phone: z.string().min(10, "Phone number is required"),
-  code: z.string().min(4, "OTP code is required"),
+const refreshSchema = z.object({
+  refreshToken: z.string().min(20, "Refresh token is required"),
 });
 
 const profileSchema = z.object({
   firstName: z.string().trim().min(1).max(40).optional(),
-  phone: z.string().min(8).max(20).optional(),
+  phone: phoneSchema.optional(),
   gender: z.enum(["man", "woman", "nonbinary", "skip"]).optional(),
   dateOfBirth: z.string().min(1).optional(),
-  socialEnergy: z
-    .enum(["introverted", "ambiverted", "extroverted"])
-    .optional(),
+  socialEnergy: z.enum(["introverted", "ambiverted", "extroverted"]).optional(),
   interests: z.array(z.string().trim().min(1)).max(20).optional(),
 });
 
-function parseDob(value: string): Date {
-  const iso = Date.parse(value);
-  if (!Number.isNaN(iso)) return new Date(iso);
+// ── Helpers ───────────────────────────────────────────────────────────────
 
-  const match = /^(\d{2})-(\d{2})-(\d{4})$/.exec(value.trim());
-  if (!match) throw new AppError("dateOfBirth must be ISO or dd-mm-yyyy");
+type SessionUser = Parameters<typeof publicUser>[0];
 
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  const year = Number(match[3]);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  if (
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() !== month - 1 ||
-    date.getUTCDate() !== day
-  ) {
-    throw new AppError("Invalid date of birth");
-  }
-  return date;
-}
-
-function ageFromDob(dob: Date): number {
-  const now = new Date();
-  let age = now.getUTCFullYear() - dob.getUTCFullYear();
-  const m = now.getUTCMonth() - dob.getUTCMonth();
-  if (m < 0 || (m === 0 && now.getUTCDate() < dob.getUTCDate())) age -= 1;
-  return age;
-}
-
-function otpDevPayload(code: string) {
-  const showDevOtp = process.env.NODE_ENV !== "production" && !env.RESEND_API_KEY;
-  return showDevOtp ? { devOtp: code } : {};
-}
-
-function publicUser(user: {
-  id: string;
-  phone: string | null;
-  email: string | null;
-  firstName: string | null;
-  fullName: string;
-  dateOfBirth: Date | null;
-  gender: string | null;
-  socialEnergy: string | null;
-  interests: string[];
-  verificationStatus: string;
-  attendanceCount: number;
-  currentStreak: number;
-  authProvider: string;
-  isAgeVerified: boolean;
-}) {
-  return {
-    id: user.id,
-    phone: user.phone,
-    email: user.email,
-    firstName: user.firstName,
-    fullName: user.fullName,
-    dateOfBirth: user.dateOfBirth
-      ? user.dateOfBirth.toISOString().slice(0, 10)
-      : null,
-    gender: user.gender,
-    socialEnergy: user.socialEnergy,
-    interests: user.interests,
-    verificationStatus: user.verificationStatus,
-    isAgeVerified: user.isAgeVerified,
-    attendanceCount: user.attendanceCount,
-    currentStreak: user.currentStreak,
-    authProvider: user.authProvider,
-  };
-}
-
-async function findOrCreateEmailUser(email: string) {
-  const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) return existing;
-
-  const hint = email.split("@")[0] ?? "Guest";
-  return prisma.user.create({
-    data: {
-      email,
-      authProvider: AuthProvider.EMAIL,
-      firstName: hint,
-      fullName: hint,
-    },
+/** Single place that turns a resolved identity into a client session. */
+async function respondWithSession(
+  req: Request,
+  res: Response,
+  user: SessionUser,
+): Promise<void> {
+  const tokens = await issueSession(user.id, {
+    userAgent: req.headers["user-agent"],
+  });
+  res.json({
+    ok: true,
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    expiresIn: tokens.accessTokenExpiresIn,
+    user: publicUser(user),
   });
 }
 
-async function findOrCreateGoogleUser(input: {
-  googleId: string;
-  email: string | null;
-  name: string;
-  givenName: string;
-}) {
-  const byGoogle = await prisma.user.findUnique({
-    where: { googleId: input.googleId },
-  });
-  if (byGoogle) return byGoogle;
+// ── Phone OTP ─────────────────────────────────────────────────────────────
 
-  if (input.email) {
-    const byEmail = await prisma.user.findUnique({
-      where: { email: input.email },
-    });
-    if (byEmail) {
-      return prisma.user.update({
-        where: { id: byEmail.id },
-        data: {
-          googleId: input.googleId,
-          firstName: byEmail.firstName || input.givenName,
-          fullName: byEmail.fullName || input.name,
-        },
+authRouter.post(
+  "/phone/otp/request",
+  otpRequestLimiter,
+  validateBody(phoneOtpRequestSchema),
+  async (req, res, next) => {
+    try {
+      const { phone } = req.body as z.infer<typeof phoneOtpRequestSchema>;
+      const normalized = normalizePhoneNumber(phone);
+
+      const challenge = await issueOtpChallenge(OtpChannel.SMS, normalized.e164);
+
+      // Test destinations short-circuit delivery; real numbers always send.
+      if (!challenge.isTestCode) {
+        await sendOtpSms(normalized.e164, normalized.callingCode, challenge.code);
+      }
+
+      res.json({
+        ok: true,
+        otpSent: true,
+        phone: normalized.e164,
+        maskedPhone: maskPhone(normalized.e164),
+        expiresAt: challenge.expiresAt.toISOString(),
+        resendAfterSeconds: challenge.resendAfterSeconds,
       });
+    } catch (err) {
+      next(err);
     }
-  }
+  },
+);
 
-  return prisma.user.create({
-    data: {
-      googleId: input.googleId,
-      email: input.email,
-      authProvider: AuthProvider.GOOGLE,
-      firstName: input.givenName,
-      fullName: input.name,
-    },
-  });
-}
+authRouter.post(
+  "/phone/otp/verify",
+  otpVerifyLimiter,
+  validateBody(phoneOtpVerifySchema),
+  async (req: AuthedRequest, res, next) => {
+    try {
+      const { phone, code } = req.body as z.infer<typeof phoneOtpVerifySchema>;
+      const normalized = normalizePhoneNumber(phone);
 
-// ── Email OTP (primary app path) ──────────────────────────────────────────
+      await consumeOtpChallenge(OtpChannel.SMS, normalized.e164, code);
+
+      const user = await findOrCreatePhoneUser(normalized.e164);
+      await respondWithSession(req, res, user);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── Email OTP ─────────────────────────────────────────────────────────────
 
 authRouter.post(
   "/email/otp/request",
+  otpRequestLimiter,
   validateBody(emailOtpRequestSchema),
   async (req, res, next) => {
     try {
       const { email } = req.body as z.infer<typeof emailOtpRequestSchema>;
       const normalized = normalizeEmail(email);
-      const key = `email:${normalized}`;
-      const code = env.RESEND_API_KEY ? generateOtpCode() : issueOtp(key);
-      if (env.RESEND_API_KEY) {
-        storeOtp(key, code);
-      }
-      console.log(`[otp] ${normalized} → ${code}`);
 
-      await sendEmailOtp(normalized, code);
+      if (!env.RESEND_API_KEY && env.NODE_ENV === "production") {
+        throw new AppError("Email sign-in is not configured", 503);
+      }
+
+      const challenge = await issueOtpChallenge(OtpChannel.EMAIL, normalized);
+      if (!challenge.isTestCode) {
+        await sendEmailOtp(normalized, challenge.code);
+      }
 
       res.json({
         ok: true,
         otpSent: true,
         email: normalized,
-        ...otpDevPayload(code),
+        maskedEmail: maskEmail(normalized),
+        expiresAt: challenge.expiresAt.toISOString(),
+        resendAfterSeconds: challenge.resendAfterSeconds,
       });
     } catch (err) {
       next(err);
@@ -215,19 +191,35 @@ authRouter.post(
 
 authRouter.post(
   "/email/otp/verify",
+  otpVerifyLimiter,
   validateBody(emailOtpVerifySchema),
-  async (req, res, next) => {
+  async (req: AuthedRequest, res, next) => {
     try {
       const { email, code } = req.body as z.infer<typeof emailOtpVerifySchema>;
       const normalized = normalizeEmail(email);
 
-      if (!verifyOtp(`email:${normalized}`, code)) {
-        throw new AppError("Invalid or expired OTP", 401);
-      }
+      await consumeOtpChallenge(OtpChannel.EMAIL, normalized, code);
 
       const user = await findOrCreateEmailUser(normalized);
-      const token = signToken(user.id);
-      res.json({ ok: true, token, user: publicUser(user) });
+      await respondWithSession(req, res, user);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── Social providers ──────────────────────────────────────────────────────
+
+authRouter.post(
+  "/google",
+  authProviderLimiter,
+  validateBody(idTokenSchema),
+  async (req: AuthedRequest, res, next) => {
+    try {
+      const { idToken } = req.body as z.infer<typeof idTokenSchema>;
+      const identity = await verifyGoogleIdToken(idToken);
+      const user = await findOrCreateGoogleUser(identity);
+      await respondWithSession(req, res, user);
     } catch (err) {
       next(err);
     }
@@ -235,20 +227,87 @@ authRouter.post(
 );
 
 authRouter.post(
-  "/google",
-  validateBody(googleAuthSchema),
-  async (req, res, next) => {
+  "/apple",
+  authProviderLimiter,
+  validateBody(idTokenSchema),
+  async (req: AuthedRequest, res, next) => {
     try {
-      const { idToken } = req.body as z.infer<typeof googleAuthSchema>;
-      const google = await verifyGoogleIdToken(idToken);
-      const user = await findOrCreateGoogleUser(google);
-      const token = signToken(user.id);
-      res.json({ ok: true, token, user: publicUser(user) });
+      const { idToken } = req.body as z.infer<typeof idTokenSchema>;
+      const identity = await verifyAppleIdToken(idToken);
+      const user = await findOrCreateAppleUser(identity);
+      await respondWithSession(req, res, user);
     } catch (err) {
       next(err);
     }
   },
 );
+
+authRouter.post(
+  "/facebook",
+  authProviderLimiter,
+  validateBody(facebookAuthSchema),
+  async (req: AuthedRequest, res, next) => {
+    try {
+      const { accessToken } = req.body as z.infer<typeof facebookAuthSchema>;
+      const identity = await verifyFacebookAccessToken(accessToken);
+      const user = await findOrCreateFacebookUser(identity);
+      await respondWithSession(req, res, user);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── Session lifecycle ─────────────────────────────────────────────────────
+
+authRouter.post(
+  "/refresh",
+  authProviderLimiter,
+  validateBody(refreshSchema),
+  async (req, res, next) => {
+    try {
+      const { refreshToken } = req.body as z.infer<typeof refreshSchema>;
+      const tokens = await rotateSession(refreshToken, {
+        userAgent: req.headers["user-agent"],
+      });
+      res.json({
+        ok: true,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresIn: tokens.accessTokenExpiresIn,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+authRouter.post(
+  "/logout",
+  validateBody(refreshSchema),
+  async (req, res, next) => {
+    try {
+      const { refreshToken } = req.body as z.infer<typeof refreshSchema>;
+      await revokeSessionByRefreshToken(refreshToken);
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── Current user ──────────────────────────────────────────────────────────
+
+authRouter.get("/me", requireAuth, async (req: AuthedRequest, res, next) => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    if (!user) throw new AppError("User not found", 404);
+    if (req.sessionId) await touchSession(req.sessionId);
+    res.json({ ok: true, user: publicUser(user) });
+  } catch (err) {
+    next(err);
+  }
+});
 
 authRouter.patch(
   "/me",
@@ -272,24 +331,30 @@ authRouter.patch(
         data.firstName = body.firstName;
         data.fullName = body.firstName;
       }
-      if (body.phone) data.phone = normalizePhone(body.phone);
       if (body.gender) data.gender = body.gender;
       if (body.socialEnergy) data.socialEnergy = body.socialEnergy;
       if (body.interests) data.interests = body.interests;
       if (body.dateOfBirth) {
         const dob = parseDob(body.dateOfBirth);
-        if (ageFromDob(dob) < 18) {
-          throw new AppError("You must be 18 or older");
-        }
+        if (ageFromDob(dob) < 18) throw new AppError("You must be 18 or older");
         data.dateOfBirth = dob;
         data.isAgeVerified = true;
       }
 
+      // A phone number is an identity key: only accept one already verified
+      // by OTP on this account, never a raw value from the client.
       if (body.phone) {
-        const taken = await prisma.user.findFirst({
-          where: { phone: data.phone, NOT: { id: req.userId } },
+        const normalized = normalizePhoneNumber(body.phone);
+        const current = await prisma.user.findUnique({
+          where: { id: req.userId },
+          select: { phone: true },
         });
-        if (taken) throw new AppError("Phone already in use", 409);
+        if (current?.phone !== normalized.e164) {
+          throw new AppError(
+            "Verify this number with a code before adding it",
+            403,
+          );
+        }
       }
 
       const user = await prisma.user.update({
@@ -302,123 +367,6 @@ authRouter.patch(
     }
   },
 );
-
-// ── Phone OTP (legacy — kept until SMS is dropped) ────────────────────────
-
-authRouter.post(
-  "/register",
-  validateBody(registerSchema),
-  async (req, res, next) => {
-    try {
-      const { fullName, dateOfBirth, phone } = req.body as z.infer<
-        typeof registerSchema
-      >;
-      const dob = parseDob(dateOfBirth);
-      if (ageFromDob(dob) < 18) {
-        throw new AppError("You must be 18 or older");
-      }
-
-      const normalized = normalizePhone(phone);
-      const existing = await prisma.user.findUnique({
-        where: { phone: normalized },
-      });
-
-      let user;
-      if (existing) {
-        user = await prisma.user.update({
-          where: { id: existing.id },
-          data: {
-            fullName,
-            firstName: fullName.split(" ")[0],
-            dateOfBirth: dob,
-            isAgeVerified: true,
-            authProvider: AuthProvider.PHONE,
-          },
-        });
-      } else {
-        user = await prisma.user.create({
-          data: {
-            fullName,
-            firstName: fullName.split(" ")[0],
-            dateOfBirth: dob,
-            phone: normalized,
-            authProvider: AuthProvider.PHONE,
-            isAgeVerified: true,
-          },
-        });
-      }
-
-      const code = issueOtp(`phone:${normalized}`);
-      console.log(`[otp] ${normalized} → ${code}`);
-
-      res.status(201).json({
-        ok: true,
-        user: publicUser(user),
-        otpSent: true,
-        ...otpDevPayload(code),
-      });
-    } catch (err) {
-      next(err);
-    }
-  },
-);
-
-authRouter.post(
-  "/otp/request",
-  validateBody(otpRequestSchema),
-  async (req, res, next) => {
-    try {
-      const { phone } = req.body as z.infer<typeof otpRequestSchema>;
-      const normalized = normalizePhone(phone);
-      const user = await prisma.user.findUnique({ where: { phone: normalized } });
-      if (!user) throw new AppError("No account for this phone. Register first.", 404);
-
-      const code = issueOtp(`phone:${normalized}`);
-      console.log(`[otp] ${normalized} → ${code}`);
-
-      res.json({
-        ok: true,
-        otpSent: true,
-        ...otpDevPayload(code),
-      });
-    } catch (err) {
-      next(err);
-    }
-  },
-);
-
-authRouter.post(
-  "/otp/verify",
-  validateBody(otpVerifySchema),
-  async (req, res, next) => {
-    try {
-      const { phone, code } = req.body as z.infer<typeof otpVerifySchema>;
-      const normalized = normalizePhone(phone);
-
-      if (!verifyOtp(`phone:${normalized}`, code)) {
-        throw new AppError("Invalid or expired OTP", 401);
-      }
-
-      const user = await prisma.user.findUnique({ where: { phone: normalized } });
-      if (!user) throw new AppError("User not found", 404);
-
-      const token = signToken(user.id);
-      res.json({ ok: true, token, user: publicUser(user) });
-    } catch (err) {
-      next(err);
-    }
-  },
-);
-
-authRouter.get("/me", requireAuth, async (req: AuthedRequest, res, next) => {
-  try {
-    const user = await prisma.user.findUnique({ where: { id: req.userId } });
-    if (!user) throw new AppError("User not found", 404);
-    res.json({ ok: true, user: publicUser(user) });
-  } catch (err) {
-    next(err);
-  }
-});
 
 authRouter.delete("/me", requireAuth, async (req: AuthedRequest, res, next) => {
   try {
@@ -440,6 +388,7 @@ authRouter.delete("/me", requireAuth, async (req: AuthedRequest, res, next) => {
       await tx.tableMember.deleteMany({ where: { userId } });
       await tx.bookingGroupMember.deleteMany({ where: { userId } });
       await tx.booking.deleteMany({ where: { userId } });
+      await tx.authSession.deleteMany({ where: { userId } });
       await tx.user.delete({ where: { id: userId } });
     });
 

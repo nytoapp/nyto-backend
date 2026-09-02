@@ -21,6 +21,9 @@ export function createApp() {
   app.use(express.json({ limit: "2mb" }));
   app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
 
+  // Rate limiters key on client IP, so the proxy chain must be trusted.
+  app.set("trust proxy", 1);
+
   app.use("/health", healthRouter);
   app.use("/auth", authRouter);
   app.use("/tables", tablesRouter);

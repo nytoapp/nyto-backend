@@ -1,0 +1,3 @@
+ALTER TYPE "AuthProvider" ADD VALUE IF NOT EXISTS 'APPLE';
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "appleId" TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS "users_appleId_key" ON "users"("appleId");
