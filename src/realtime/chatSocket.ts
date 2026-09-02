@@ -1,8 +1,7 @@
 import type { Server as HttpServer } from "http";
 import { Server } from "socket.io";
-import jwt from "jsonwebtoken";
 import { env } from "../config/env";
-import type { AuthPayload } from "../middleware/auth";
+import { isSessionActive, verifyAccessToken } from "../lib/tokens";
 import { prisma } from "../lib/prisma";
 
 let chatIo: Server | null = null;
@@ -19,7 +18,7 @@ export function attachChatSocket(httpServer: HttpServer): Server {
     },
   });
 
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
       const token =
         (socket.handshake.auth?.token as string | undefined) ||
@@ -29,7 +28,10 @@ export function attachChatSocket(httpServer: HttpServer): Server {
           : undefined);
 
       if (!token) return next(new Error("Unauthorized"));
-      const payload = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
+      const payload = verifyAccessToken(token);
+      if (!(await isSessionActive(payload.sid))) {
+        return next(new Error("Unauthorized"));
+      }
       socket.data.userId = payload.userId;
       return next();
     } catch {
