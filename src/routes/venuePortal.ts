@@ -2,7 +2,9 @@ import { Router } from "express";
 import {
   DietaryPreference,
   GenderPreference,
+  NytoTableType,
   PriceTier,
+  TablePaymentType,
   TableStatus,
   UserRole,
 } from "@prisma/client";
@@ -11,6 +13,7 @@ import { prisma } from "../lib/prisma";
 import { seatsHoldingCapacity } from "../lib/bookingSeats";
 import { checkInByCode } from "../lib/bookingLifecycle";
 import { defaultBookingOpensAt } from "../lib/bookingWindow";
+import { genderPreferenceForTableType } from "../lib/tableType";
 import {
   requireAuth,
   requireRoles,
@@ -73,6 +76,10 @@ const tableCreateSchema = z.object({
   seatPrice: z.number().int().min(0),
   capacity: z.number().int().min(2).max(12).optional(),
   genderPreference: z.enum(["BALANCED", "WOMEN_ONLY"]).optional(),
+  tableType: z.enum(["WEEKLY", "WOMEN_LED", "COUPLES", "SINGLES"]).optional(),
+  paymentType: z.enum(["ALL_INCLUSIVE", "PAY_OWN_BILL"]).optional(),
+  vibeCopy: z.string().trim().max(180).optional(),
+  inclusions: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
   icebreakers: z.array(z.string().trim().min(1).max(160)).max(12).optional(),
 });
 
@@ -84,6 +91,10 @@ const tablePatchSchema = z.object({
   seatPrice: z.number().int().min(0).optional(),
   capacity: z.number().int().min(2).max(12).optional(),
   genderPreference: z.enum(["BALANCED", "WOMEN_ONLY"]).optional(),
+  tableType: z.enum(["WEEKLY", "WOMEN_LED", "COUPLES", "SINGLES"]).optional(),
+  paymentType: z.enum(["ALL_INCLUSIVE", "PAY_OWN_BILL"]).optional(),
+  vibeCopy: z.string().trim().max(180).nullable().optional(),
+  inclusions: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
   icebreakers: z.array(z.string().trim().min(1).max(160)).max(12).optional(),
   /** Venue may open/cancel upcoming inventory only — not destroy paid nights casually. */
   status: z.enum(["OPEN", "CANCELLED"]).optional(),
@@ -199,6 +210,7 @@ venueRouter.post(
       }
 
       const startsAt = new Date(body.startsAt);
+      const tableType = (body.tableType as NytoTableType) ?? NytoTableType.WEEKLY;
       const table = await prisma.supperTable.create({
         data: {
           venueId,
@@ -210,9 +222,15 @@ venueRouter.post(
           priceTier: body.priceTier as PriceTier,
           seatPrice: body.seatPrice,
           capacity: body.capacity ?? 6,
+          tableType,
+          paymentType:
+            (body.paymentType as TablePaymentType) ??
+            TablePaymentType.ALL_INCLUSIVE,
+          vibeCopy: body.vibeCopy,
+          inclusions: body.inclusions ?? [],
           genderPreference:
             (body.genderPreference as GenderPreference) ??
-            GenderPreference.BALANCED,
+            genderPreferenceForTableType(tableType),
           icebreakers: body.icebreakers ?? [],
           status: TableStatus.OPEN,
         },
@@ -283,7 +301,15 @@ venueRouter.patch(
           priceTier: body.priceTier as PriceTier | undefined,
           seatPrice: body.seatPrice,
           capacity: body.capacity,
-          genderPreference: body.genderPreference as GenderPreference | undefined,
+          tableType: body.tableType as NytoTableType | undefined,
+          paymentType: body.paymentType as TablePaymentType | undefined,
+          vibeCopy: body.vibeCopy === undefined ? undefined : body.vibeCopy,
+          inclusions: body.inclusions,
+          genderPreference:
+            (body.genderPreference as GenderPreference | undefined) ??
+            (body.tableType
+              ? genderPreferenceForTableType(body.tableType as NytoTableType)
+              : undefined),
           icebreakers: body.icebreakers,
           status: body.status as TableStatus | undefined,
         },

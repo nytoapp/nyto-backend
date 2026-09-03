@@ -2,18 +2,62 @@ import { Router } from "express";
 import {
   BookingStatus,
   GenderPreference,
+  NytoTableType,
   PriceTier,
+  TablePaymentType,
   TableStatus,
 } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { seatsHoldingCapacity } from "../lib/bookingSeats";
-import { isBookingOpen } from "../lib/bookingWindow";
+import { isHoldingStatus, seatsHoldingCapacity } from "../lib/bookingSeats";
+import { isBookingOpen, istCalendarDate } from "../lib/bookingWindow";
+import { isInstantTable } from "../lib/instantTable";
 import {
   LAUNCH_CITY,
   areasForFilter,
 } from "../lib/hyderabadAreas";
+import {
+  classifyGender,
+  defaultVibeCopy,
+  matchingTransparency,
+} from "../lib/tableBookingRules";
+import { parseTableType } from "../lib/tableType";
 
 export const tablesRouter = Router();
+
+const bookingSelect = {
+  seatsBooked: true,
+  status: true,
+  createdAt: true,
+  bookingType: true,
+  user: { select: { gender: true } },
+} as const;
+
+type BookingRow = {
+  seatsBooked: number;
+  status: BookingStatus;
+  createdAt: Date;
+  bookingType?: string;
+  user?: { gender: string | null } | null;
+};
+
+function fillCounts(bookings: BookingRow[]) {
+  let women = 0;
+  let men = 0;
+  let other = 0;
+  let coupleUnits = 0;
+  for (const b of bookings) {
+    if (!isHoldingStatus(b.status)) continue;
+    if (b.bookingType === "COUPLE") {
+      coupleUnits += Math.floor(b.seatsBooked / 2);
+      continue;
+    }
+    const bucket = classifyGender(b.user?.gender);
+    if (bucket === "WOMAN") women += b.seatsBooked;
+    else if (bucket === "MAN") men += b.seatsBooked;
+    else other += b.seatsBooked;
+  }
+  return { women, men, other, coupleUnits };
+}
 
 function formatTable(
   table: {
@@ -23,6 +67,10 @@ function formatTable(
     priceTier: PriceTier;
     seatPrice: number;
     capacity: number;
+    tableType: NytoTableType;
+    paymentType: TablePaymentType;
+    vibeCopy: string | null;
+    inclusions: string[];
     genderPreference: GenderPreference;
     status: TableStatus;
     venue: {
@@ -31,16 +79,24 @@ function formatTable(
       city: string;
       area: string | null;
     };
-    bookings: { seatsBooked: number; status: BookingStatus; createdAt: Date }[];
+    bookings: BookingRow[];
   },
   now = new Date(),
 ) {
   const seatsTaken = seatsHoldingCapacity(table.bookings);
+  const seatsLeft = Math.max(table.capacity - seatsTaken, 0);
   const bookable = isBookingOpen(table.bookingOpensAt, table.startsAt, now);
+  const instant = isInstantTable(
+    table.startsAt,
+    seatsLeft,
+    bookable,
+    now,
+  );
   const selectedArea =
     table.venue.area?.trim() ||
     table.venue.address.split(",")[0]?.trim() ||
     table.venue.city;
+  const fill = fillCounts(table.bookings);
 
   const weekday = table.startsAt.toLocaleDateString("en-GB", {
     weekday: "short",
@@ -68,8 +124,17 @@ function formatTable(
     startsAt: table.startsAt.toISOString(),
     bookingOpensAt: table.bookingOpensAt.toISOString(),
     bookable,
+    instant,
     seatPrice: table.seatPrice,
     priceTier: table.priceTier,
+    tableType: table.tableType,
+    paymentType: table.paymentType,
+    vibeCopy: table.vibeCopy?.trim() || defaultVibeCopy(table.tableType),
+    inclusions: table.inclusions,
+    matchingLine: matchingTransparency(table.tableType),
+    womenConfirmed: fill.women,
+    menConfirmed: fill.men,
+    couplesConfirmed: fill.coupleUnits,
     slot:
       table.priceTier === PriceTier.DAYTIME
         ? "DAYTIME_LUNCH"
@@ -77,10 +142,12 @@ function formatTable(
     area: selectedArea,
     venueName: table.venue.name,
     city: table.venue.city,
-    womenOnly: table.genderPreference === GenderPreference.WOMEN_ONLY,
+    womenOnly:
+      table.tableType === NytoTableType.WOMEN_LED ||
+      table.genderPreference === GenderPreference.WOMEN_ONLY,
     capacity: table.capacity,
     seatsTaken: Math.min(seatsTaken, table.capacity),
-    seatsLeft: Math.max(table.capacity - seatsTaken, 0),
+    seatsLeft,
     status: table.status,
   };
 }
@@ -96,6 +163,31 @@ tablesRouter.get("/", async (req, res, next) => {
       typeof req.query.area === "string" ? req.query.area.trim() : "ALL";
     const includeNearby =
       req.query.nearby === "0" || req.query.nearby === "false" ? false : true;
+    const priceMinRaw =
+      typeof req.query.priceMin === "string"
+        ? Number.parseInt(req.query.priceMin, 10)
+        : NaN;
+    const priceMaxRaw =
+      typeof req.query.priceMax === "string"
+        ? Number.parseInt(req.query.priceMax, 10)
+        : NaN;
+    const priceMin = Number.isFinite(priceMinRaw) ? priceMinRaw : undefined;
+    const priceMax = Number.isFinite(priceMaxRaw) ? priceMaxRaw : undefined;
+    const dayFilter =
+      typeof req.query.day === "string" && req.query.day.trim()
+        ? req.query.day.trim()
+        : undefined;
+    const tableType =
+      parseTableType(req.query.tableType) ??
+      (filter === "women_only" ? NytoTableType.WOMEN_LED : undefined);
+    const paymentTypeRaw =
+      typeof req.query.paymentType === "string"
+        ? req.query.paymentType.trim()
+        : "";
+    const paymentType =
+      paymentTypeRaw === "ALL_INCLUSIVE" || paymentTypeRaw === "PAY_OWN_BILL"
+        ? paymentTypeRaw
+        : undefined;
 
     const areaList = includeNearby
       ? areasForFilter(areaRaw)
@@ -110,8 +202,16 @@ tablesRouter.get("/", async (req, res, next) => {
         startsAt: { gte: now },
         ...(filter === "daytime" ? { priceTier: PriceTier.DAYTIME } : {}),
         ...(filter === "evening" ? { priceTier: PriceTier.EVENING } : {}),
-        ...(filter === "women_only"
-          ? { genderPreference: GenderPreference.WOMEN_ONLY }
+        ...(tableType ? { tableType } : {}),
+        ...(paymentType ? { paymentType } : {}),
+        ...(priceMin != null ? { seatPrice: { gte: priceMin } } : {}),
+        ...(priceMax != null
+          ? {
+              seatPrice: {
+                ...(priceMin != null ? { gte: priceMin } : {}),
+                lte: priceMax,
+              },
+            }
           : {}),
         venue: {
           isActive: true,
@@ -121,15 +221,17 @@ tablesRouter.get("/", async (req, res, next) => {
       },
       include: {
         venue: true,
-        bookings: {
-          select: { seatsBooked: true, status: true, createdAt: true },
-        },
+        bookings: { select: bookingSelect },
       },
       orderBy: { startsAt: "asc" },
       take: 50,
     });
 
-    const nextUnlock = tables
+    const dayScoped = dayFilter
+      ? tables.filter((t) => istCalendarDate(t.startsAt) === dayFilter)
+      : tables;
+
+    const nextUnlock = dayScoped
       .filter((t) => t.bookingOpensAt > now)
       .map((t) => t.bookingOpensAt)
       .sort((a, b) => a.getTime() - b.getTime())[0];
@@ -139,7 +241,7 @@ tablesRouter.get("/", async (req, res, next) => {
       city,
       area: areaRaw || "ALL",
       nextBookingOpensAt: nextUnlock?.toISOString() ?? null,
-      tables: tables.map((t) => formatTable(t, now)),
+      tables: dayScoped.map((t) => formatTable(t, now)),
     });
   } catch (err) {
     next(err);
@@ -154,9 +256,7 @@ tablesRouter.get("/:id", async (req, res, next) => {
       include: {
         venue: true,
         menu: true,
-        bookings: {
-          select: { seatsBooked: true, status: true, createdAt: true },
-        },
+        bookings: { select: bookingSelect },
         members: true,
       },
     });

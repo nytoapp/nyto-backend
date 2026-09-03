@@ -5,11 +5,11 @@
  * Admin/venue may override by setting bookingOpensAt explicitly later.
  */
 
-function istCalendarDate(d: Date): string {
+export function istCalendarDate(d: Date): string {
   return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
-function istWeekdayShort(d: Date): string {
+export function istWeekdayShort(d: Date): string {
   return d.toLocaleDateString("en-US", {
     weekday: "short",
     timeZone: "Asia/Kolkata",
