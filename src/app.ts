@@ -10,6 +10,9 @@ import { bookingsRouter } from "./routes/bookings";
 import { verificationRouter } from "./routes/verification";
 import { chatRouter } from "./routes/chat";
 import { directRouter } from "./routes/direct";
+import { adminRouter } from "./routes/admin";
+import { venueRouter } from "./routes/venuePortal";
+import { locationsRouter } from "./routes/locations";
 import { errorHandler } from "./middleware/errorHandler";
 import { notFound } from "./middleware/notFound";
 
@@ -31,6 +34,9 @@ export function createApp() {
   app.use("/verification", verificationRouter);
   app.use("/chat", chatRouter);
   app.use("/chat", directRouter);
+  app.use("/admin", adminRouter);
+  app.use("/venue", venueRouter);
+  app.use("/locations", locationsRouter);
 
   app.use(notFound);
   app.use(errorHandler);

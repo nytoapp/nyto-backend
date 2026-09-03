@@ -126,6 +126,7 @@ export function publicUser(user: User) {
     id: user.id,
     phone: user.phone,
     email: user.email,
+    role: user.role,
     firstName: user.firstName,
     fullName: user.fullName,
     dateOfBirth: user.dateOfBirth
