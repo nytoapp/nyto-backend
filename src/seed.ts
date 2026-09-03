@@ -1,14 +1,16 @@
 import {
   AuthProvider,
   DietaryPreference,
-  GenderPreference,
+  NytoTableType,
   PriceTier,
+  TablePaymentType,
   TableStatus,
   UserRole,
   VenueStaffRole,
 } from "@prisma/client";
 import { prisma } from "./lib/prisma";
 import { defaultBookingOpensAt } from "./lib/bookingWindow";
+import { genderPreferenceForTableType } from "./lib/tableType";
 
 function atLocal(daysFromNow: number, hour: number, minute = 0): Date {
   const d = new Date();
@@ -128,9 +130,10 @@ async function seed() {
     minute?: number;
     tier: PriceTier;
     price: number;
-    womenOnly?: boolean;
+    tableType: NytoTableType;
+    paymentType?: TablePaymentType;
+    inclusions?: string[];
     menuId?: string;
-    /** Force a future unlock for countdown demos. */
     forceOpensInHours?: number;
   }> = [
     {
@@ -139,7 +142,9 @@ async function seed() {
       hour: 20,
       tier: PriceTier.EVENING,
       price: 1299,
+      tableType: NytoTableType.WEEKLY,
       menuId: menu.id,
+      inclusions: ["3-course dinner", "Welcome drink", "Host facilitation"],
     },
     {
       venueId: venues[1].id,
@@ -147,6 +152,9 @@ async function seed() {
       hour: 13,
       tier: PriceTier.DAYTIME,
       price: 799,
+      tableType: NytoTableType.SINGLES,
+      paymentType: TablePaymentType.PAY_OWN_BILL,
+      inclusions: ["Shared lunch table", "Icebreaker cards"],
     },
     {
       venueId: venues[2].id,
@@ -154,6 +162,8 @@ async function seed() {
       hour: 20,
       tier: PriceTier.EVENING,
       price: 999,
+      tableType: NytoTableType.WEEKLY,
+      inclusions: ["Dinner", "Soft drinks"],
     },
     {
       venueId: venues[3].id,
@@ -161,6 +171,8 @@ async function seed() {
       hour: 20,
       tier: PriceTier.EVENING,
       price: 1199,
+      tableType: NytoTableType.COUPLES,
+      inclusions: ["Dinner for two", "Shared dessert"],
     },
     {
       venueId: venues[4].id,
@@ -168,7 +180,8 @@ async function seed() {
       hour: 19,
       tier: PriceTier.EVENING,
       price: 1099,
-      womenOnly: true,
+      tableType: NytoTableType.WOMEN_LED,
+      inclusions: ["Dinner", "Welcome mocktail"],
     },
     {
       venueId: venues[5].id,
@@ -177,6 +190,8 @@ async function seed() {
       minute: 30,
       tier: PriceTier.DAYTIME,
       price: 699,
+      tableType: NytoTableType.WEEKLY,
+      paymentType: TablePaymentType.PAY_OWN_BILL,
     },
     {
       venueId: venues[6].id,
@@ -184,8 +199,9 @@ async function seed() {
       hour: 20,
       tier: PriceTier.EVENING,
       price: 899,
-      // Keep one table locked so Home can show countdown UX.
+      tableType: NytoTableType.SINGLES,
       forceOpensInHours: 36,
+      inclusions: ["Dinner", "Live ratio mix"],
     },
   ];
 
@@ -205,9 +221,10 @@ async function seed() {
         priceTier: spec.tier,
         seatPrice: spec.price,
         status: TableStatus.OPEN,
-        genderPreference: spec.womenOnly
-          ? GenderPreference.WOMEN_ONLY
-          : GenderPreference.BALANCED,
+        tableType: spec.tableType,
+        paymentType: spec.paymentType ?? TablePaymentType.ALL_INCLUSIVE,
+        inclusions: spec.inclusions ?? [],
+        genderPreference: genderPreferenceForTableType(spec.tableType),
         icebreakers,
       },
     });
@@ -228,7 +245,7 @@ async function seed() {
       {
         code: "WOMEN_ONLY_TABLE",
         name: "Women-Only Table",
-        description: "Joined a women-only table.",
+        description: "Joined a women-led table.",
       },
       {
         code: "CHEFS_PICK",
@@ -270,7 +287,7 @@ async function seed() {
     },
   });
 
-  console.log("Seed complete (Hyderabad areas).");
+  console.log("Seed complete (Hyderabad + 4 table types).");
   console.log(`  admin:  ${admin.email} (${admin.role})`);
   console.log(
     `  venue:  ${venueOwner.email} (${venueOwner.role}) → ${venues[0].name}`,

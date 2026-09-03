@@ -2,7 +2,10 @@ import { Router } from "express";
 import {
   DietaryPreference,
   GenderPreference,
+  HostApplicationStatus,
+  NytoTableType,
   PriceTier,
+  TablePaymentType,
   TableStatus,
   UserRole,
   VenueStaffRole,
@@ -19,6 +22,11 @@ import { AppError } from "../middleware/errorHandler";
 import { validateBody } from "../middleware/validate";
 import { cancelBookingAsAdmin } from "../lib/bookingLifecycle";
 import { defaultBookingOpensAt } from "../lib/bookingWindow";
+import { genderPreferenceForTableType } from "../lib/tableType";
+import {
+  approveHostApplication,
+  rejectHostApplication,
+} from "../lib/hostApplications";
 
 export const adminRouter = Router();
 adminRouter.use(requireAuth, requireRoles(UserRole.ADMIN));
@@ -59,6 +67,10 @@ const tableCreateSchema = z.object({
   seatPrice: z.number().int().min(0),
   capacity: z.number().int().min(2).max(12).optional(),
   genderPreference: z.enum(["BALANCED", "WOMEN_ONLY"]).optional(),
+  tableType: z.enum(["WEEKLY", "WOMEN_LED", "COUPLES", "SINGLES"]).optional(),
+  paymentType: z.enum(["ALL_INCLUSIVE", "PAY_OWN_BILL"]).optional(),
+  vibeCopy: z.string().trim().max(180).optional(),
+  inclusions: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
   icebreakers: z.array(z.string().trim().min(1).max(160)).max(12).optional(),
   status: z.enum(["OPEN", "CANCELLED"]).optional(),
 });
@@ -71,6 +83,10 @@ const tablePatchSchema = z.object({
   seatPrice: z.number().int().min(0).optional(),
   capacity: z.number().int().min(2).max(12).optional(),
   genderPreference: z.enum(["BALANCED", "WOMEN_ONLY"]).optional(),
+  tableType: z.enum(["WEEKLY", "WOMEN_LED", "COUPLES", "SINGLES"]).optional(),
+  paymentType: z.enum(["ALL_INCLUSIVE", "PAY_OWN_BILL"]).optional(),
+  vibeCopy: z.string().trim().max(180).nullable().optional(),
+  inclusions: z.array(z.string().trim().min(1).max(80)).max(8).optional(),
   icebreakers: z.array(z.string().trim().min(1).max(160)).max(12).optional(),
   status: z
     .enum([
@@ -266,6 +282,7 @@ adminRouter.post(
       }
 
       const startsAt = new Date(body.startsAt);
+      const tableType = (body.tableType as NytoTableType) ?? NytoTableType.WEEKLY;
       const table = await prisma.supperTable.create({
         data: {
           venueId,
@@ -277,9 +294,15 @@ adminRouter.post(
           priceTier: body.priceTier as PriceTier,
           seatPrice: body.seatPrice,
           capacity: body.capacity ?? 6,
+          tableType,
+          paymentType:
+            (body.paymentType as TablePaymentType) ??
+            TablePaymentType.ALL_INCLUSIVE,
+          vibeCopy: body.vibeCopy,
+          inclusions: body.inclusions ?? [],
           genderPreference:
             (body.genderPreference as GenderPreference) ??
-            GenderPreference.BALANCED,
+            genderPreferenceForTableType(tableType),
           icebreakers: body.icebreakers ?? [],
           status: (body.status as TableStatus) ?? TableStatus.OPEN,
         },
@@ -327,7 +350,15 @@ adminRouter.patch(
           priceTier: body.priceTier as PriceTier | undefined,
           seatPrice: body.seatPrice,
           capacity: body.capacity,
-          genderPreference: body.genderPreference as GenderPreference | undefined,
+          tableType: body.tableType as NytoTableType | undefined,
+          paymentType: body.paymentType as TablePaymentType | undefined,
+          vibeCopy: body.vibeCopy === undefined ? undefined : body.vibeCopy,
+          inclusions: body.inclusions,
+          genderPreference:
+            (body.genderPreference as GenderPreference | undefined) ??
+            (body.tableType
+              ? genderPreferenceForTableType(body.tableType as NytoTableType)
+              : undefined),
           icebreakers: body.icebreakers,
           status: body.status as TableStatus | undefined,
         },
@@ -406,6 +437,86 @@ adminRouter.post(
       const body = req.body as z.infer<typeof adminCancelSchema>;
       const booking = await cancelBookingAsAdmin(bookingId, body.reason);
       res.json({ ok: true, booking });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+adminRouter.get("/host-applications", async (req, res, next) => {
+  try {
+    const statusRaw =
+      typeof req.query.status === "string" ? req.query.status : "PENDING";
+    const status =
+      statusRaw === "ALL"
+        ? undefined
+        : (statusRaw as HostApplicationStatus);
+    const applications = await prisma.hostApplication.findMany({
+      where: status ? { status } : {},
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            fullName: true,
+            phone: true,
+            email: true,
+            role: true,
+          },
+        },
+        venue: {
+          select: { id: true, name: true, city: true, area: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    res.json({ ok: true, applications });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const hostApproveSchema = z.object({
+  venueId: z.string().min(1).optional(),
+});
+
+adminRouter.post(
+  "/host-applications/:id/approve",
+  validateBody(hostApproveSchema),
+  async (req: AuthedRequest, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const body = req.body as z.infer<typeof hostApproveSchema>;
+      const application = await approveHostApplication({
+        applicationId: id,
+        adminUserId: req.userId!,
+        venueId: body.venueId,
+      });
+      res.json({ ok: true, application });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+const hostRejectSchema = z.object({
+  reason: z.string().trim().min(1).max(240).optional(),
+});
+
+adminRouter.post(
+  "/host-applications/:id/reject",
+  validateBody(hostRejectSchema),
+  async (req: AuthedRequest, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const body = req.body as z.infer<typeof hostRejectSchema>;
+      const application = await rejectHostApplication({
+        applicationId: id,
+        adminUserId: req.userId!,
+        reason: body.reason,
+      });
+      res.json({ ok: true, application });
     } catch (err) {
       next(err);
     }

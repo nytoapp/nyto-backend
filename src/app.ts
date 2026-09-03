@@ -13,6 +13,7 @@ import { directRouter } from "./routes/direct";
 import { adminRouter } from "./routes/admin";
 import { venueRouter } from "./routes/venuePortal";
 import { locationsRouter } from "./routes/locations";
+import { hostApplicationsRouter } from "./routes/hostApplications";
 import { errorHandler } from "./middleware/errorHandler";
 import { notFound } from "./middleware/notFound";
 
@@ -37,6 +38,7 @@ export function createApp() {
   app.use("/admin", adminRouter);
   app.use("/venue", venueRouter);
   app.use("/locations", locationsRouter);
+  app.use("/host-applications", hostApplicationsRouter);
 
   app.use(notFound);
   app.use(errorHandler);

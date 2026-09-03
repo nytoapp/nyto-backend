@@ -57,6 +57,21 @@ enum DietaryPreference {
 enum BookingType {
   SOLO
   GROUP
+  /// One couple — occupies 2 seats on a Couples table.
+  COUPLE
+}
+
+/// Product table types. Instant is NOT a type — it is a filtered view.
+enum NytoTableType {
+  WEEKLY
+  WOMEN_LED
+  COUPLES
+  SINGLES
+}
+
+enum TablePaymentType {
+  ALL_INCLUSIVE
+  PAY_OWN_BILL
 }
 
 enum BookingStatus {
@@ -112,6 +127,13 @@ enum DirectThreadStatus {
   DECLINED
 }
 
+enum HostApplicationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
 model User {
   id                 String             @id @default(cuid())
   phone              String?            @unique
@@ -152,6 +174,7 @@ model User {
   badges             UserBadge[]
   authSessions       AuthSession[]
   venueStaff         VenueStaff[]
+  hostApplications   HostApplication[]
 
   @@map("users")
 }
@@ -247,6 +270,7 @@ model Venue {
   menus  VenueMenu[]
   tables SupperTable[]
   staff  VenueStaff[]
+  hostApplications HostApplication[]
 
   @@index([city, area])
   @@map("venues")
@@ -270,6 +294,38 @@ model VenueStaff {
   @@index([venueId, isActive])
   @@index([userId, isActive])
   @@map("venue_staff")
+}
+
+/// Venue/host access request. Selecting HOST in the app is intent only —
+/// privileges are granted only after NYTO admin approval.
+model HostApplication {
+  id              String                @id @default(cuid())
+  userId          String
+  status          HostApplicationStatus @default(PENDING)
+  contactName     String
+  contactPhone    String?
+  contactEmail    String?
+  venueName       String
+  venueType       String?
+  address         String
+  city            String                @default("Hyderabad")
+  area            String?
+  businessDetails String?
+  notes           String?
+  /// Set when admin approves and creates/links a venue.
+  venueId         String?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue Venue? @relation(fields: [venueId], references: [id])
+
+  @@index([status, createdAt])
+  @@index([userId, status])
+  @@map("host_applications")
 }
 
 model VenueMenu {
@@ -298,9 +354,13 @@ model SupperTable {
   bookingOpensAt    DateTime
   priceTier         PriceTier
   seatPrice         Int
+  tableType         NytoTableType    @default(WEEKLY)
+  paymentType       TablePaymentType @default(ALL_INCLUSIVE)
   status            TableStatus      @default(OPEN)
   genderPreference  GenderPreference @default(BALANCED)
   capacity          Int              @default(6)
+  vibeCopy          String?
+  inclusions        String[]         @default([])
   reviewedBy        String?
   reviewedAt        DateTime?
   revealedAt        DateTime?
@@ -315,6 +375,7 @@ model SupperTable {
   messages ChatMessage[]
 
   @@index([bookingOpensAt])
+  @@index([tableType])
   @@map("supper_tables")
 }
 

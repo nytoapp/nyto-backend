@@ -11,6 +11,7 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import {
   PENDING_PAYMENT_TTL_MS,
+  isHoldingStatus,
   seatsHoldingCapacity,
 } from "../lib/bookingSeats";
 import { generateCheckInCode } from "../lib/checkInCode";
@@ -19,12 +20,16 @@ import { moneyFor } from "../lib/pricing";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validateBody } from "../middleware/validate";
+import {
+  assertBookingAllowed,
+  classifyGender,
+} from "../lib/tableBookingRules";
 
 export const bookingsRouter = Router();
 
 const createSchema = z.object({
   tableId: z.string().min(1),
-  bookingType: z.enum(["SOLO", "GROUP"]),
+  bookingType: z.enum(["SOLO", "GROUP", "COUPLE"]),
   seatsBooked: z.number().int().min(1).max(3),
 });
 
@@ -57,21 +62,17 @@ bookingsRouter.post(
     try {
       const body = req.body as z.infer<typeof createSchema>;
 
-      if (body.bookingType === "SOLO" && body.seatsBooked !== 1) {
-        throw new AppError("Solo booking must be 1 seat");
-      }
-      if (
-        body.bookingType === "GROUP" &&
-        (body.seatsBooked < 2 || body.seatsBooked > 3)
-      ) {
-        throw new AppError("Group booking must be 2 or 3 seats");
-      }
-
       const table = await prisma.supperTable.findUnique({
         where: { id: body.tableId },
         include: {
           bookings: {
-            select: { seatsBooked: true, status: true, createdAt: true },
+            select: {
+              seatsBooked: true,
+              status: true,
+              createdAt: true,
+              bookingType: true,
+              user: { select: { gender: true } },
+            },
           },
         },
       });
@@ -93,8 +94,36 @@ bookingsRouter.post(
       }
 
       const seatsTaken = seatsHoldingCapacity(table.bookings);
-      if (seatsTaken + body.seatsBooked > table.capacity) {
-        throw new AppError("Not enough seats left on this table");
+      const seatsLeft = Math.max(table.capacity - seatsTaken, 0);
+      let womenHolding = 0;
+      let menHolding = 0;
+      for (const b of table.bookings) {
+        if (!isHoldingStatus(b.status)) continue;
+        const bucket = classifyGender(b.user.gender);
+        if (bucket === "WOMAN") womenHolding += b.seatsBooked;
+        if (bucket === "MAN") menHolding += b.seatsBooked;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: req.userId! },
+        select: { gender: true },
+      });
+
+      try {
+        assertBookingAllowed({
+          tableType: table.tableType,
+          bookingType: body.bookingType,
+          seatsBooked: body.seatsBooked,
+          seatsLeft,
+          userGender: user?.gender,
+          womenHolding,
+          menHolding,
+        });
+      } catch (err) {
+        throw new AppError(
+          err instanceof Error ? err.message : "Booking not allowed",
+          400,
+        );
       }
 
       const money = moneyFor(table.seatPrice, body.seatsBooked);
