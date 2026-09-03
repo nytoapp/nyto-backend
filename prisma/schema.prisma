@@ -15,6 +15,20 @@ enum AuthProvider {
   FACEBOOK
 }
 
+/// Platform role. Never trust a client-supplied role — always load from DB.
+enum UserRole {
+  USER
+  VENUE_STAFF
+  ADMIN
+}
+
+/// Role of a staff member within a single venue tenant.
+enum VenueStaffRole {
+  OWNER
+  MANAGER
+  STAFF
+}
+
 enum OtpChannel {
   SMS
   EMAIL
@@ -53,6 +67,25 @@ enum BookingStatus {
   NO_SHOW
 }
 
+enum PaymentStatus {
+  PENDING
+  CAPTURED
+  REFUNDED
+  FAILED
+}
+
+enum PaymentMethod {
+  UPI
+  CARD
+  UNKNOWN
+}
+
+enum PaymentProvider {
+  /// Local stub until Razorpay (or similar) is wired.
+  STUB
+  RAZORPAY
+}
+
 enum TableStatus {
   OPEN
   MATCHING
@@ -87,6 +120,8 @@ model User {
   facebookId         String?            @unique
   email              String?            @unique
   authProvider       AuthProvider
+  /// Platform privilege. Default consumer; elevated only via admin tooling/seed.
+  role               UserRole           @default(USER)
   firstName          String?
   fullName           String             @default("")
   dateOfBirth        DateTime?
@@ -116,6 +151,7 @@ model User {
   receivedSignals    ConnectionSignal[]     @relation("ToUser")
   badges             UserBadge[]
   authSessions       AuthSession[]
+  venueStaff         VenueStaff[]
 
   @@map("users")
 }
@@ -200,6 +236,8 @@ model Venue {
   name        String
   address     String
   city        String
+  /// Neighbourhood within the city (e.g. Madhapur). Used for Home area filters.
+  area        String?
   lat         Float?
   lng         Float?
   isActive    Boolean  @default(true)
@@ -208,8 +246,30 @@ model Venue {
 
   menus  VenueMenu[]
   tables SupperTable[]
+  staff  VenueStaff[]
 
+  @@index([city, area])
   @@map("venues")
+}
+
+/// Links a user to a venue they may manage. Tenant scope always comes from here,
+/// never from a client-supplied venueId claim alone.
+model VenueStaff {
+  id        String         @id @default(cuid())
+  userId    String
+  venueId   String
+  staffRole VenueStaffRole @default(STAFF)
+  isActive  Boolean        @default(true)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, venueId])
+  @@index([venueId, isActive])
+  @@index([userId, isActive])
+  @@map("venue_staff")
 }
 
 model VenueMenu {
@@ -234,6 +294,8 @@ model SupperTable {
   venueId           String
   menuId            String?
   startsAt          DateTime
+  /// When guests may pay/book. Before this, table is visible but locked.
+  bookingOpensAt    DateTime
   priceTier         PriceTier
   seatPrice         Int
   status            TableStatus      @default(OPEN)
@@ -252,6 +314,7 @@ model SupperTable {
   members  TableMember[]
   messages ChatMessage[]
 
+  @@index([bookingOpensAt])
   @@map("supper_tables")
 }
 
@@ -264,16 +327,46 @@ model Booking {
   seatsBooked     Int           @default(1)
   amountPaid      Int?
   paidAt          DateTime?
+  /// Legacy short ref kept for older clients; prefer Payment.providerRef.
   paymentRef      String?
+  /// Short code shown / QR'd at the venue door after payment.
+  checkInCode     String?       @unique
+  checkedInAt     DateTime?
   cancelledAt     DateTime?
+  cancelReason    String?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
   user    User                 @relation(fields: [userId], references: [id])
   table   SupperTable          @relation(fields: [tableId], references: [id])
   members BookingGroupMember[]
+  payment Payment?
 
+  @@index([tableId, status])
+  @@index([userId, status])
   @@map("bookings")
+}
+
+/// Ledger row for money against a booking. PSP details live here so admin/venue
+/// can see payment state without trusting the client.
+model Payment {
+  id           String          @id @default(cuid())
+  bookingId    String          @unique
+  amount       Int
+  currency     String          @default("INR")
+  status       PaymentStatus   @default(PENDING)
+  method       PaymentMethod   @default(UNKNOWN)
+  provider     PaymentProvider @default(STUB)
+  providerRef  String?
+  capturedAt   DateTime?
+  refundedAt   DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@map("payments")
 }
 
 model BookingGroupMember {

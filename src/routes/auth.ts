@@ -300,10 +300,31 @@ authRouter.post(
 
 authRouter.get("/me", requireAuth, async (req: AuthedRequest, res, next) => {
   try {
-    const user = await prisma.user.findUnique({ where: { id: req.userId } });
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      include: {
+        venueStaff: {
+          where: { isActive: true },
+          select: {
+            venueId: true,
+            staffRole: true,
+            venue: { select: { id: true, name: true, city: true } },
+          },
+        },
+      },
+    });
     if (!user) throw new AppError("User not found", 404);
     if (req.sessionId) await touchSession(req.sessionId);
-    res.json({ ok: true, user: publicUser(user) });
+    res.json({
+      ok: true,
+      user: publicUser(user),
+      venueMemberships: user.venueStaff.map((m) => ({
+        venueId: m.venueId,
+        staffRole: m.staffRole,
+        venueName: m.venue.name,
+        city: m.venue.city,
+      })),
+    });
   } catch (err) {
     next(err);
   }
@@ -388,6 +409,7 @@ authRouter.delete("/me", requireAuth, async (req: AuthedRequest, res, next) => {
       await tx.tableMember.deleteMany({ where: { userId } });
       await tx.bookingGroupMember.deleteMany({ where: { userId } });
       await tx.booking.deleteMany({ where: { userId } });
+      await tx.venueStaff.deleteMany({ where: { userId } });
       await tx.authSession.deleteMany({ where: { userId } });
       await tx.user.delete({ where: { id: userId } });
     });

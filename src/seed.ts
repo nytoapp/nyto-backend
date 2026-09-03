@@ -1,10 +1,14 @@
 import {
+  AuthProvider,
   DietaryPreference,
   GenderPreference,
   PriceTier,
   TableStatus,
+  UserRole,
+  VenueStaffRole,
 } from "@prisma/client";
 import { prisma } from "./lib/prisma";
+import { defaultBookingOpensAt } from "./lib/bookingWindow";
 
 function atLocal(daysFromNow: number, hour: number, minute = 0): Date {
   const d = new Date();
@@ -19,64 +23,83 @@ async function seed() {
   await prisma.chatMessage.deleteMany();
   await prisma.tableMember.deleteMany();
   await prisma.bookingGroupMember.deleteMany();
+  await prisma.payment.deleteMany();
   await prisma.booking.deleteMany();
   await prisma.supperTable.deleteMany();
   await prisma.venueMenu.deleteMany();
+  await prisma.venueStaff.deleteMany();
   await prisma.venue.deleteMany();
   await prisma.badge.deleteMany();
 
   const venues = await Promise.all([
     prisma.venue.create({
       data: {
-        name: "Caperberry",
-        address: "Lavelle Road, Central Bengaluru",
-        city: "Bengaluru",
-        lat: 12.9716,
-        lng: 77.5946,
+        name: "SkyGarden Madhapur",
+        address: "Road No. 36, Madhapur, Hyderabad",
+        city: "Hyderabad",
+        area: "Madhapur",
+        lat: 17.4483,
+        lng: 78.3915,
       },
     }),
     prisma.venue.create({
       data: {
-        name: "The Table Club",
-        address: "Bandra West, Mumbai",
-        city: "Mumbai",
-        lat: 19.0596,
-        lng: 72.8295,
+        name: "Hitech Terrace",
+        address: "Cyber Towers, Hitech City, Hyderabad",
+        city: "Hyderabad",
+        area: "Hitech City",
+        lat: 17.4435,
+        lng: 78.3772,
       },
     }),
     prisma.venue.create({
       data: {
-        name: "Coast & Fire",
-        address: "Colaba, Mumbai",
-        city: "Mumbai",
+        name: "Gachibowli House",
+        address: "Financial District, Gachibowli, Hyderabad",
+        city: "Hyderabad",
+        area: "Gachibowli",
+        lat: 17.4401,
+        lng: 78.3489,
       },
     }),
     prisma.venue.create({
       data: {
-        name: "Lower Parel House",
-        address: "Lower Parel, Mumbai",
-        city: "Mumbai",
+        name: "Jubilee Supper Club",
+        address: "Road No. 92, Jubilee Hills, Hyderabad",
+        city: "Hyderabad",
+        area: "Jubilee Hills",
+        lat: 17.4308,
+        lng: 78.407,
       },
     }),
     prisma.venue.create({
       data: {
-        name: "Versova Kitchen",
-        address: "Versova, Mumbai",
-        city: "Mumbai",
+        name: "Banjara Long Table",
+        address: "Road No. 12, Banjara Hills, Hyderabad",
+        city: "Hyderabad",
+        area: "Banjara Hills",
+        lat: 17.414,
+        lng: 78.437,
       },
     }),
     prisma.venue.create({
       data: {
-        name: "Juhu Supper",
-        address: "Juhu, Mumbai",
-        city: "Mumbai",
+        name: "Ameerpet Kitchen",
+        address: "Ameerpet Cross Roads, Hyderabad",
+        city: "Hyderabad",
+        area: "Ameerpet",
+        lat: 17.4375,
+        lng: 78.4482,
       },
     }),
     prisma.venue.create({
       data: {
-        name: "Powai Garden",
-        address: "Powai, Mumbai",
-        city: "Mumbai",
+        name: "Kondapur Garden",
+        address: "Kothaguda, Kondapur, Hyderabad",
+        city: "Hyderabad",
+        area: "Kondapur",
+        lat: 17.467,
+        lng: 78.367,
       },
     }),
   ]);
@@ -84,7 +107,7 @@ async function seed() {
   const menu = await prisma.venueMenu.create({
     data: {
       venueId: venues[0].id,
-      name: "Caperberry tasting",
+      name: "SkyGarden tasting",
       description:
         "I FIRST — Burrata, heirloom tomato, aged balsamic.\nII SECOND — Sea bass, saffron beurre blanc, crisp fennel.\nIII THIRD — Valrhona fondant, salted caramel, praline.",
       dietaryType: DietaryPreference.NON_VEGETARIAN,
@@ -107,50 +130,78 @@ async function seed() {
     price: number;
     womenOnly?: boolean;
     menuId?: string;
+    /** Force a future unlock for countdown demos. */
+    forceOpensInHours?: number;
   }> = [
-    { venueId: venues[1].id, days: 1, hour: 20, tier: PriceTier.EVENING, price: 899 },
-    { venueId: venues[2].id, days: 2, hour: 13, tier: PriceTier.DAYTIME, price: 649 },
-    {
-      venueId: venues[3].id,
-      days: 3,
-      hour: 20,
-      tier: PriceTier.EVENING,
-      price: 1299,
-    },
-    { venueId: venues[4].id, days: 5, hour: 20, tier: PriceTier.EVENING, price: 899 },
-    {
-      venueId: venues[5].id,
-      days: 6,
-      hour: 19,
-      tier: PriceTier.EVENING,
-      price: 999,
-      womenOnly: true,
-    },
-    {
-      venueId: venues[6].id,
-      days: 7,
-      hour: 12,
-      minute: 30,
-      tier: PriceTier.DAYTIME,
-      price: 749,
-    },
     {
       venueId: venues[0].id,
       days: 2,
       hour: 20,
-      minute: 30,
       tier: PriceTier.EVENING,
       price: 1299,
       menuId: menu.id,
     },
+    {
+      venueId: venues[1].id,
+      days: 3,
+      hour: 13,
+      tier: PriceTier.DAYTIME,
+      price: 799,
+    },
+    {
+      venueId: venues[2].id,
+      days: 4,
+      hour: 20,
+      tier: PriceTier.EVENING,
+      price: 999,
+    },
+    {
+      venueId: venues[3].id,
+      days: 5,
+      hour: 20,
+      tier: PriceTier.EVENING,
+      price: 1199,
+    },
+    {
+      venueId: venues[4].id,
+      days: 6,
+      hour: 19,
+      tier: PriceTier.EVENING,
+      price: 1099,
+      womenOnly: true,
+    },
+    {
+      venueId: venues[5].id,
+      days: 7,
+      hour: 12,
+      minute: 30,
+      tier: PriceTier.DAYTIME,
+      price: 699,
+    },
+    {
+      venueId: venues[6].id,
+      days: 8,
+      hour: 20,
+      tier: PriceTier.EVENING,
+      price: 899,
+      // Keep one table locked so Home can show countdown UX.
+      forceOpensInHours: 36,
+    },
   ];
 
   for (const spec of tableSpecs) {
+    const startsAt = atLocal(spec.days, spec.hour, spec.minute ?? 0);
+    const bookingOpensAt =
+      spec.forceOpensInHours != null
+        ? new Date(Date.now() + spec.forceOpensInHours * 60 * 60 * 1000)
+        : defaultBookingOpensAt(startsAt);
+
     await prisma.supperTable.create({
       data: {
         venueId: spec.venueId,
         menuId: spec.menuId,
-        startsAt: atLocal(spec.days, spec.hour, spec.minute ?? 0),
+        startsAt,
+        bookingOpensAt,
         priceTier: spec.tier,
         seatPrice: spec.price,
         status: TableStatus.OPEN,
@@ -187,7 +238,43 @@ async function seed() {
     ],
   });
 
-  console.log("Seed complete.");
+  const admin = await prisma.user.upsert({
+    where: { email: "admin@nyto.app" },
+    create: {
+      email: "admin@nyto.app",
+      authProvider: AuthProvider.EMAIL,
+      role: UserRole.ADMIN,
+      firstName: "NYTO",
+      fullName: "NYTO Admin",
+    },
+    update: { role: UserRole.ADMIN },
+  });
+
+  const venueOwner = await prisma.user.upsert({
+    where: { email: "venue@nyto.app" },
+    create: {
+      email: "venue@nyto.app",
+      authProvider: AuthProvider.EMAIL,
+      role: UserRole.VENUE_STAFF,
+      firstName: "SkyGarden",
+      fullName: "SkyGarden Staff",
+    },
+    update: { role: UserRole.VENUE_STAFF },
+  });
+
+  await prisma.venueStaff.create({
+    data: {
+      userId: venueOwner.id,
+      venueId: venues[0].id,
+      staffRole: VenueStaffRole.OWNER,
+    },
+  });
+
+  console.log("Seed complete (Hyderabad areas).");
+  console.log(`  admin:  ${admin.email} (${admin.role})`);
+  console.log(
+    `  venue:  ${venueOwner.email} (${venueOwner.role}) → ${venues[0].name}`,
+  );
 }
 
 seed()
