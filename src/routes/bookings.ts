@@ -14,9 +14,16 @@ import {
   isHoldingStatus,
   seatsHoldingCapacity,
 } from "../lib/bookingSeats";
-import { generateCheckInCode } from "../lib/checkInCode";
 import { cancelBookingAsUser } from "../lib/bookingLifecycle";
+import { captureBookingPayment } from "../lib/captureBookingPayment";
 import { moneyFor } from "../lib/pricing";
+import {
+  createRazorpayOrder,
+  isRazorpayConfigured,
+  paymentMode,
+  verifyRazorpayPaymentSignature,
+} from "../lib/razorpay";
+import { env } from "../config/env";
 import { requireAuth, type AuthedRequest } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validateBody } from "../middleware/validate";
@@ -37,7 +44,46 @@ const paySchema = z.object({
   method: z.enum(["UPI", "CARD"]),
 });
 
+const razorpayConfirmSchema = z.object({
+  razorpay_order_id: z.string().min(1),
+  razorpay_payment_id: z.string().min(1),
+  razorpay_signature: z.string().min(1),
+});
+
 bookingsRouter.use(requireAuth);
+
+async function assertPayableBooking(bookingId: string, userId: string) {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    include: { table: true, payment: true },
+  });
+  if (!booking) throw new AppError("Booking not found", 404);
+  if (booking.userId !== userId) throw new AppError("Forbidden", 403);
+  if (booking.status !== BookingStatus.PENDING_PAYMENT) {
+    throw new AppError("Booking is not awaiting payment");
+  }
+  if (Date.now() - booking.createdAt.getTime() > PENDING_PAYMENT_TTL_MS) {
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: {
+        status: BookingStatus.CANCELLED,
+        cancelledAt: new Date(),
+        cancelReason: "Payment hold expired",
+      },
+    });
+    throw new AppError("Payment hold expired — create a new booking", 409);
+  }
+  return booking;
+}
+
+bookingsRouter.get("/payment-config", async (_req, res) => {
+  const mode = paymentMode();
+  res.json({
+    ok: true,
+    mode,
+    keyId: mode === "razorpay" ? env.RAZORPAY_KEY_ID : null,
+  });
+});
 
 bookingsRouter.get("/me", async (req: AuthedRequest, res, next) => {
   try {
@@ -157,151 +203,162 @@ bookingsRouter.post(
   },
 );
 
+/** Create Razorpay order for checkout (Test or Live keys). */
+bookingsRouter.post(
+  "/:id/razorpay/order",
+  async (req: AuthedRequest, res, next) => {
+    try {
+      if (!isRazorpayConfigured()) {
+        throw new AppError(
+          "Razorpay is not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.",
+          503,
+        );
+      }
+
+      const id = String(req.params.id);
+      const booking = await assertPayableBooking(id, req.userId!);
+      const money = moneyFor(booking.table.seatPrice, booking.seatsBooked);
+
+      const order = await createRazorpayOrder({
+        amountInr: money.total,
+        receipt: booking.id,
+        notes: {
+          bookingId: booking.id,
+          userId: booking.userId,
+          tableId: booking.tableId,
+        },
+      });
+
+      await prisma.payment.upsert({
+        where: { bookingId: booking.id },
+        create: {
+          bookingId: booking.id,
+          amount: money.total,
+          currency: "INR",
+          status: PaymentStatus.PENDING,
+          method: PaymentMethod.UNKNOWN,
+          provider: PaymentProvider.RAZORPAY,
+          providerRef: order.id,
+        },
+        update: {
+          amount: money.total,
+          status: PaymentStatus.PENDING,
+          provider: PaymentProvider.RAZORPAY,
+          providerRef: order.id,
+          capturedAt: null,
+        },
+      });
+
+      res.json({
+        ok: true,
+        mode: "razorpay",
+        keyId: env.RAZORPAY_KEY_ID,
+        orderId: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        bookingId: booking.id,
+        pricing: money,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Verify Razorpay checkout success — never trust the client alone. */
+bookingsRouter.post(
+  "/:id/razorpay/confirm",
+  validateBody(razorpayConfirmSchema),
+  async (req: AuthedRequest, res, next) => {
+    try {
+      if (!isRazorpayConfigured()) {
+        throw new AppError("Razorpay is not configured", 503);
+      }
+
+      const id = String(req.params.id);
+      const body = req.body as z.infer<typeof razorpayConfirmSchema>;
+
+      const booking = await prisma.booking.findUnique({
+        where: { id },
+        include: { payment: true },
+      });
+      if (!booking) throw new AppError("Booking not found", 404);
+      if (booking.userId !== req.userId) throw new AppError("Forbidden", 403);
+
+      if (
+        booking.payment?.providerRef &&
+        booking.payment.providerRef !== body.razorpay_order_id &&
+        booking.status === BookingStatus.PENDING_PAYMENT
+      ) {
+        throw new AppError("Order mismatch — create a new payment order", 409);
+      }
+
+      const valid = verifyRazorpayPaymentSignature({
+        orderId: body.razorpay_order_id,
+        paymentId: body.razorpay_payment_id,
+        signature: body.razorpay_signature,
+      });
+      if (!valid) throw new AppError("Invalid payment signature", 400);
+
+      const captured = await captureBookingPayment({
+        bookingId: id,
+        userId: req.userId!,
+        provider: PaymentProvider.RAZORPAY,
+        providerRef: body.razorpay_payment_id,
+        method: PaymentMethod.UNKNOWN,
+      });
+
+      res.json({
+        ok: true,
+        booking: captured.booking,
+        pricing: captured.pricing,
+        checkInCode: captured.checkInCode,
+        paymentRef: body.razorpay_payment_id,
+        alreadyCaptured: captured.alreadyCaptured,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/**
+ * Dev stub payment — only when Razorpay keys are missing.
+ * Never available once Razorpay is configured.
+ */
 bookingsRouter.post(
   "/:id/pay",
   validateBody(paySchema),
   async (req: AuthedRequest, res, next) => {
     try {
-      const id = String(req.params.id);
-      const booking = await prisma.booking.findUnique({
-        where: { id },
-        include: { table: true, payment: true },
-      });
-      if (!booking) throw new AppError("Booking not found", 404);
-      if (booking.userId !== req.userId) {
-        throw new AppError("Forbidden", 403);
-      }
-      if (booking.status !== BookingStatus.PENDING_PAYMENT) {
-        throw new AppError("Booking is not awaiting payment");
-      }
-      if (
-        Date.now() - booking.createdAt.getTime() >
-        PENDING_PAYMENT_TTL_MS
-      ) {
-        await prisma.booking.update({
-          where: { id: booking.id },
-          data: {
-            status: BookingStatus.CANCELLED,
-            cancelledAt: new Date(),
-            cancelReason: "Payment hold expired",
-          },
-        });
-        throw new AppError("Payment hold expired — create a new booking", 409);
+      if (isRazorpayConfigured()) {
+        throw new AppError(
+          "Use Razorpay checkout (/razorpay/order + /razorpay/confirm)",
+          400,
+        );
       }
 
-      const money = moneyFor(booking.table.seatPrice, booking.seatsBooked);
+      const id = String(req.params.id);
+      await assertPayableBooking(id, req.userId!);
+
       const method = (req.body as z.infer<typeof paySchema>).method;
       const providerRef = `nyto_stub_${method.toLowerCase()}_${Date.now()}`;
 
-      const updated = await prisma.$transaction(async (tx) => {
-        // Re-check capacity under lock of this transaction's read.
-        const peers = await tx.booking.findMany({
-          where: {
-            tableId: booking.tableId,
-            id: { not: booking.id },
-          },
-          select: { seatsBooked: true, status: true, createdAt: true },
-        });
-        const taken = seatsHoldingCapacity(peers);
-        if (taken + booking.seatsBooked > booking.table.capacity) {
-          throw new AppError("Not enough seats left on this table", 409);
-        }
-
-        let checkInCode = generateCheckInCode();
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const clash = await tx.booking.findUnique({
-            where: { checkInCode },
-            select: { id: true },
-          });
-          if (!clash) break;
-          checkInCode = generateCheckInCode();
-        }
-
-        const paid = await tx.booking.update({
-          where: { id: booking.id },
-          data: {
-            status: BookingStatus.CONFIRMED,
-            amountPaid: money.total,
-            paidAt: new Date(),
-            paymentRef: providerRef,
-            checkInCode,
-          },
-          include: {
-            table: { include: { venue: true, menu: true } },
-            payment: true,
-          },
-        });
-
-        await tx.payment.upsert({
-          where: { bookingId: booking.id },
-          create: {
-            bookingId: booking.id,
-            amount: money.total,
-            currency: "INR",
-            status: PaymentStatus.CAPTURED,
-            method: method as PaymentMethod,
-            provider: PaymentProvider.STUB,
-            providerRef,
-            capturedAt: new Date(),
-          },
-          update: {
-            amount: money.total,
-            status: PaymentStatus.CAPTURED,
-            method: method as PaymentMethod,
-            provider: PaymentProvider.STUB,
-            providerRef,
-            capturedAt: new Date(),
-          },
-        });
-
-        await tx.tableMember.upsert({
-          where: {
-            tableId_userId: {
-              tableId: booking.tableId,
-              userId: booking.userId,
-            },
-          },
-          create: {
-            tableId: booking.tableId,
-            userId: booking.userId,
-            oneLineDescription: null,
-          },
-          update: {},
-        });
-
-        const confirmedSeats = await tx.booking.aggregate({
-          where: {
-            tableId: booking.tableId,
-            status: {
-              in: [BookingStatus.CONFIRMED, BookingStatus.ATTENDED],
-            },
-          },
-          _sum: { seatsBooked: true },
-        });
-
-        const confirmedTaken = confirmedSeats._sum.seatsBooked ?? 0;
-        if (confirmedTaken >= booking.table.capacity) {
-          await tx.supperTable.update({
-            where: { id: booking.tableId },
-            data: { status: TableStatus.MATCHING },
-          });
-        }
-
-        return tx.booking.findUniqueOrThrow({
-          where: { id: paid.id },
-          include: {
-            table: { include: { venue: true, menu: true } },
-            payment: true,
-          },
-        });
+      const captured = await captureBookingPayment({
+        bookingId: id,
+        userId: req.userId!,
+        provider: PaymentProvider.STUB,
+        providerRef,
+        method: method as PaymentMethod,
       });
 
       res.json({
         ok: true,
-        booking: updated,
-        pricing: money,
+        mode: "stub",
+        booking: captured.booking,
+        pricing: captured.pricing,
         paymentRef: providerRef,
-        checkInCode: updated.checkInCode,
+        checkInCode: captured.checkInCode,
       });
     } catch (err) {
       next(err);
