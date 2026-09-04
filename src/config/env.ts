@@ -92,6 +92,12 @@ const envSchema = z.object({
   // ── Product config ──────────────────────────────────────────────────────
   TABLE_EVENT_DURATION_HOURS: z.coerce.number().min(1).default(4),
   TABLE_CHAT_GRACE_PERIOD_HOURS: z.coerce.number().min(0).default(72),
+
+  // ── Payments (Razorpay) ─────────────────────────────────────────────────
+  /** Test or live Key Id from Razorpay Dashboard → API Keys. */
+  RAZORPAY_KEY_ID: optionalString,
+  /** Never ship to the mobile app — server only. */
+  RAZORPAY_KEY_SECRET: optionalString,
 });
 
 export const env = envSchema.parse(process.env);
