@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import {
-  haveSharedTable,
+  haveSharedEndedMeetup,
   isBlockedEitherWay,
   pairUserIds,
   peerUserId,
@@ -107,8 +107,11 @@ directRouter.post(
       const me = req.userId!;
       const otherId = (req.body as z.infer<typeof userIdSchema>).userId;
       if (otherId === me) throw new AppError("You can't message yourself", 400);
-      if (!(await haveSharedTable(me, otherId))) {
-        throw new AppError("You can message people you've sat with", 403);
+      if (!(await haveSharedEndedMeetup(me, otherId))) {
+        throw new AppError(
+          "Private chat opens after the night, if they accept",
+          403,
+        );
       }
       if (await isBlockedEitherWay(me, otherId)) {
         throw new AppError("You can't message this person", 403);
@@ -207,6 +210,18 @@ directRouter.post(
       if (thread.status === "DECLINED") {
         throw new AppError("This chat was declined", 403);
       }
+      if (thread.status === "PENDING" && thread.initiatedById !== me) {
+        throw new AppError("Accept the request before you reply", 403);
+      }
+      if (thread.status === "PENDING" && thread.initiatedById === me) {
+        const already = await prisma.directMessage.findFirst({
+          where: { threadId, senderId: me },
+          select: { id: true },
+        });
+        if (already) {
+          throw new AppError("Waiting for them to accept", 403);
+        }
+      }
 
       const body = req.body as z.infer<typeof sendSchema>;
 
@@ -228,15 +243,6 @@ directRouter.post(
       }
 
       const created = await prisma.$transaction(async (tx) => {
-        if (
-          thread.status === "PENDING" &&
-          thread.initiatedById !== me
-        ) {
-          await tx.directThread.update({
-            where: { id: threadId },
-            data: { status: "ACTIVE" },
-          });
-        }
         const msg = await tx.directMessage.create({
           data: {
             threadId,
@@ -268,10 +274,7 @@ directRouter.post(
       const peer = peerUserId(thread, me);
       io?.to(`user:${peer}`).emit("direct.updated", {
         threadId,
-        status:
-          thread.status === "PENDING" && thread.initiatedById !== me
-            ? "ACTIVE"
-            : thread.status,
+        status: thread.status,
       });
 
       res.status(201).json({ ok: true, message: payload });

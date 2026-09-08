@@ -97,8 +97,8 @@ export async function findOrCreatePhoneUser(e164: string): Promise<User> {
     data: {
       phone: e164,
       authProvider: AuthProvider.PHONE,
-      firstName: "Guest",
-      fullName: "Guest",
+      firstName: null,
+      fullName: "",
     },
   });
 }
@@ -134,6 +134,9 @@ export function publicUser(user: User) {
       : null,
     gender: user.gender,
     socialEnergy: user.socialEnergy,
+    conversationStyle: user.conversationStyle,
+    tableOneLiner: user.tableOneLiner,
+    datingIntent: user.datingIntent,
     interests: user.interests,
     verificationStatus: user.verificationStatus,
     isAgeVerified: user.isAgeVerified,

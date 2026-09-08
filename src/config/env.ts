@@ -92,6 +92,8 @@ const envSchema = z.object({
   // ── Product config ──────────────────────────────────────────────────────
   TABLE_EVENT_DURATION_HOURS: z.coerce.number().min(1).default(4),
   TABLE_CHAT_GRACE_PERIOD_HOURS: z.coerce.number().min(0).default(72),
+  /** Singles hard age band. Width is config, not a buried product lock. */
+  SINGLES_AGE_BAND_YEARS: z.coerce.number().min(1).max(20).default(8),
 
   // ── Payments (Razorpay) ─────────────────────────────────────────────────
   /** Test or live Key Id from Razorpay Dashboard → API Keys. */
