@@ -31,6 +31,7 @@ import {
   assertBookingAllowed,
   classifyGender,
 } from "../lib/tableBookingRules";
+import { assertSeatingMatch } from "../lib/matching";
 
 export const bookingsRouter = Router();
 
@@ -117,7 +118,15 @@ bookingsRouter.post(
               status: true,
               createdAt: true,
               bookingType: true,
-              user: { select: { gender: true } },
+              user: {
+                select: {
+                  gender: true,
+                  dateOfBirth: true,
+                  interests: true,
+                  socialEnergy: true,
+                  conversationStyle: true,
+                },
+              },
             },
           },
         },
@@ -152,7 +161,13 @@ bookingsRouter.post(
 
       const user = await prisma.user.findUnique({
         where: { id: req.userId! },
-        select: { gender: true },
+        select: {
+          gender: true,
+          dateOfBirth: true,
+          interests: true,
+          socialEnergy: true,
+          conversationStyle: true,
+        },
       });
 
       try {
@@ -164,6 +179,23 @@ bookingsRouter.post(
           userGender: user?.gender,
           womenHolding,
           menHolding,
+        });
+        assertSeatingMatch({
+          tableType: table.tableType,
+          me: {
+            dateOfBirth: user?.dateOfBirth,
+            interests: user?.interests,
+            socialEnergy: user?.socialEnergy,
+            conversationStyle: user?.conversationStyle,
+          },
+          peers: table.bookings
+            .filter((b) => isHoldingStatus(b.status))
+            .map((b) => ({
+              dateOfBirth: b.user.dateOfBirth,
+              interests: b.user.interests,
+              socialEnergy: b.user.socialEnergy,
+              conversationStyle: b.user.conversationStyle,
+            })),
         });
       } catch (err) {
         throw new AppError(

@@ -150,6 +150,12 @@ model User {
   gender             String?
   /// introverted | ambiverted | extroverted
   socialEnergy       String?
+  /// W2 table profile: calm | mixed | lively
+  conversationStyle  String?
+  /// Shown to table-mates after the night, not on Home.
+  tableOneLiner      String?
+  /// Singles only: women | men | open
+  datingIntent       String?
   interests          String[]           @default([])
   isAgeVerified      Boolean            @default(false)
   verificationStatus VerificationStatus @default(PENDING)

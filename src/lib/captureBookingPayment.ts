@@ -120,6 +120,11 @@ export async function captureBookingPayment(opts: {
       },
     });
 
+    const memberUser = await tx.user.findUnique({
+      where: { id: booking.userId },
+      select: { tableOneLiner: true },
+    });
+
     await tx.tableMember.upsert({
       where: {
         tableId_userId: {
@@ -130,9 +135,11 @@ export async function captureBookingPayment(opts: {
       create: {
         tableId: booking.tableId,
         userId: booking.userId,
-        oneLineDescription: null,
+        oneLineDescription: memberUser?.tableOneLiner ?? null,
       },
-      update: {},
+      update: {
+        oneLineDescription: memberUser?.tableOneLiner ?? undefined,
+      },
     });
 
     const confirmedSeats = await tx.booking.aggregate({

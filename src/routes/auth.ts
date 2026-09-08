@@ -79,6 +79,9 @@ const profileSchema = z.object({
   gender: z.enum(["man", "woman", "nonbinary", "skip"]).optional(),
   dateOfBirth: z.string().min(1).optional(),
   socialEnergy: z.enum(["introverted", "ambiverted", "extroverted"]).optional(),
+  conversationStyle: z.enum(["calm", "mixed", "lively"]).optional(),
+  tableOneLiner: z.string().trim().min(2).max(80).optional(),
+  datingIntent: z.enum(["women", "men", "open"]).optional(),
   interests: z.array(z.string().trim().min(1)).max(20).optional(),
 });
 
@@ -345,6 +348,9 @@ authRouter.patch(
         dateOfBirth?: Date;
         isAgeVerified?: boolean;
         socialEnergy?: string;
+        conversationStyle?: string;
+        tableOneLiner?: string;
+        datingIntent?: string;
         interests?: string[];
       } = {};
 
@@ -354,6 +360,9 @@ authRouter.patch(
       }
       if (body.gender) data.gender = body.gender;
       if (body.socialEnergy) data.socialEnergy = body.socialEnergy;
+      if (body.conversationStyle) data.conversationStyle = body.conversationStyle;
+      if (body.tableOneLiner) data.tableOneLiner = body.tableOneLiner;
+      if (body.datingIntent) data.datingIntent = body.datingIntent;
       if (body.interests) data.interests = body.interests;
       if (body.dateOfBirth) {
         const dob = parseDob(body.dateOfBirth);

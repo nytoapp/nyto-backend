@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { publicUserBrief } from "./tableChat";
+import { publicUserBrief, getTableChatWindow } from "./tableChat";
 
 export function pairUserIds(a: string, b: string) {
   return a < b
@@ -23,6 +23,30 @@ export async function haveSharedTable(userId: string, otherId: string) {
     select: { id: true },
   });
   return Boolean(hit);
+}
+
+/** Private DMs only after a shared meetup has ended — not during the table chat. */
+export async function haveSharedEndedMeetup(
+  userId: string,
+  otherId: string,
+  now = new Date(),
+) {
+  const memberships = await prisma.tableMember.findMany({
+    where: {
+      userId,
+      table: {
+        status: { not: "CANCELLED" },
+        members: { some: { userId: otherId } },
+      },
+    },
+    select: {
+      table: { select: { startsAt: true, status: true } },
+    },
+  });
+  return memberships.some((row) => {
+    const window = getTableChatWindow(row.table, now);
+    return now.getTime() >= new Date(window.eventEndsAt).getTime();
+  });
 }
 
 export async function isBlockedEitherWay(a: string, b: string) {
