@@ -9,14 +9,16 @@ import {
   VenueStaffRole,
 } from "@prisma/client";
 import { prisma } from "./lib/prisma";
-import { defaultBookingOpensAt } from "./lib/bookingWindow";
 import { genderPreferenceForTableType } from "./lib/tableType";
 
-function atLocal(daysFromNow: number, hour: number, minute = 0): Date {
-  const d = new Date();
-  d.setDate(d.getDate() + daysFromNow);
-  d.setHours(hour, minute, 0, 0);
-  return d;
+/** Fixed December nights so local test tables do not expire mid-week. */
+function atDecember(day: number, hour: number, minute = 0): Date {
+  return new Date(2026, 11, day, hour, minute, 0, 0);
+}
+
+/** Seed tables are bookable immediately — default T-3 unlock would hide Dec nights. */
+function bookingOpenNow(): Date {
+  return new Date(Date.now() - 60_000);
 }
 
 async function seed() {
@@ -104,6 +106,16 @@ async function seed() {
         lng: 78.367,
       },
     }),
+    prisma.venue.create({
+      data: {
+        name: "Film Nagar Terrace",
+        address: "Film Nagar Road, Hyderabad",
+        city: "Hyderabad",
+        area: "Film Nagar",
+        lat: 17.4135,
+        lng: 78.417,
+      },
+    }),
   ]);
 
   const menu = await prisma.venueMenu.create({
@@ -123,9 +135,10 @@ async function seed() {
     "One food opinion you’d defend to the bitter end.",
   ];
 
+  // December 2026 nights — spread across areas, prices, types, and payment styles.
   const tableSpecs: Array<{
     venueId: string;
-    days: number;
+    day: number;
     hour: number;
     minute?: number;
     tier: PriceTier;
@@ -134,11 +147,10 @@ async function seed() {
     paymentType?: TablePaymentType;
     inclusions?: string[];
     menuId?: string;
-    forceOpensInHours?: number;
   }> = [
     {
       venueId: venues[0].id,
-      days: 2,
+      day: 5,
       hour: 20,
       tier: PriceTier.EVENING,
       price: 1299,
@@ -148,7 +160,7 @@ async function seed() {
     },
     {
       venueId: venues[1].id,
-      days: 3,
+      day: 6,
       hour: 13,
       tier: PriceTier.DAYTIME,
       price: 799,
@@ -158,7 +170,7 @@ async function seed() {
     },
     {
       venueId: venues[2].id,
-      days: 4,
+      day: 7,
       hour: 20,
       tier: PriceTier.EVENING,
       price: 999,
@@ -167,7 +179,7 @@ async function seed() {
     },
     {
       venueId: venues[3].id,
-      days: 5,
+      day: 10,
       hour: 20,
       tier: PriceTier.EVENING,
       price: 1199,
@@ -176,7 +188,7 @@ async function seed() {
     },
     {
       venueId: venues[4].id,
-      days: 6,
+      day: 12,
       hour: 19,
       tier: PriceTier.EVENING,
       price: 1099,
@@ -185,39 +197,63 @@ async function seed() {
     },
     {
       venueId: venues[5].id,
-      days: 7,
+      day: 13,
       hour: 12,
       minute: 30,
       tier: PriceTier.DAYTIME,
       price: 699,
       tableType: NytoTableType.WEEKLY,
       paymentType: TablePaymentType.PAY_OWN_BILL,
+      inclusions: ["Lunch", "Shared table"],
     },
     {
       venueId: venues[6].id,
-      days: 8,
+      day: 14,
       hour: 20,
       tier: PriceTier.EVENING,
       price: 899,
       tableType: NytoTableType.SINGLES,
-      forceOpensInHours: 36,
       inclusions: ["Dinner", "Live ratio mix"],
+    },
+    {
+      venueId: venues[7].id,
+      day: 17,
+      hour: 19,
+      tier: PriceTier.EVENING,
+      price: 1499,
+      tableType: NytoTableType.WEEKLY,
+      inclusions: ["Premium dinner", "Welcome drink"],
+    },
+    {
+      venueId: venues[4].id,
+      day: 19,
+      hour: 20,
+      tier: PriceTier.EVENING,
+      price: 1050,
+      tableType: NytoTableType.SINGLES,
+      paymentType: TablePaymentType.PAY_OWN_BILL,
+      inclusions: ["Dinner", "Pay your own bill"],
+    },
+    {
+      venueId: venues[3].id,
+      day: 20,
+      hour: 13,
+      tier: PriceTier.DAYTIME,
+      price: 1150,
+      tableType: NytoTableType.WOMEN_LED,
+      inclusions: ["Lunch", "Women-led table"],
     },
   ];
 
   for (const spec of tableSpecs) {
-    const startsAt = atLocal(spec.days, spec.hour, spec.minute ?? 0);
-    const bookingOpensAt =
-      spec.forceOpensInHours != null
-        ? new Date(Date.now() + spec.forceOpensInHours * 60 * 60 * 1000)
-        : defaultBookingOpensAt(startsAt);
+    const startsAt = atDecember(spec.day, spec.hour, spec.minute ?? 0);
 
     await prisma.supperTable.create({
       data: {
         venueId: spec.venueId,
         menuId: spec.menuId,
         startsAt,
-        bookingOpensAt,
+        bookingOpensAt: bookingOpenNow(),
         priceTier: spec.tier,
         seatPrice: spec.price,
         status: TableStatus.OPEN,
@@ -287,7 +323,9 @@ async function seed() {
     },
   });
 
-  console.log("Seed complete (Hyderabad + 4 table types).");
+  console.log(
+    "Seed complete (Hyderabad · December 2026 test nights · bookable now).",
+  );
   console.log(`  admin:  ${admin.email} (${admin.role})`);
   console.log(
     `  venue:  ${venueOwner.email} (${venueOwner.role}) → ${venues[0].name}`,
