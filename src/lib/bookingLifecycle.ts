@@ -75,7 +75,7 @@ export async function cancelBookingAsUser(
       data: {
         status: BookingStatus.CANCELLED,
         cancelledAt: new Date(),
-        cancelReason: "Cancelled by guest",
+        cancelReason: "USER",
       },
       include: {
         table: { include: { venue: true } },
@@ -126,7 +126,7 @@ export async function cancelBookingAsAdmin(
       data: {
         status: BookingStatus.CANCELLED,
         cancelledAt: new Date(),
-        cancelReason: reason?.trim() || "Cancelled by admin",
+        cancelReason: "NYTO",
       },
       include: {
         table: { include: { venue: true } },

@@ -163,10 +163,14 @@ async function seed() {
       day: 6,
       hour: 13,
       tier: PriceTier.DAYTIME,
-      price: 799,
+      price: 399,
       tableType: NytoTableType.SINGLES,
       paymentType: TablePaymentType.PAY_OWN_BILL,
-      inclusions: ["Shared lunch table", "Icebreaker cards"],
+      inclusions: [
+        "Seat & matching",
+        "Complimentary soft drink",
+        "Food paid at the venue",
+      ],
     },
     {
       venueId: venues[2].id,
@@ -201,10 +205,14 @@ async function seed() {
       hour: 12,
       minute: 30,
       tier: PriceTier.DAYTIME,
-      price: 699,
+      price: 399,
       tableType: NytoTableType.WEEKLY,
       paymentType: TablePaymentType.PAY_OWN_BILL,
-      inclusions: ["Lunch", "Shared table"],
+      inclusions: [
+        "Seat & matching",
+        "Complimentary snack",
+        "Food paid at the venue",
+      ],
     },
     {
       venueId: venues[6].id,
@@ -229,10 +237,14 @@ async function seed() {
       day: 19,
       hour: 20,
       tier: PriceTier.EVENING,
-      price: 1050,
+      price: 399,
       tableType: NytoTableType.SINGLES,
       paymentType: TablePaymentType.PAY_OWN_BILL,
-      inclusions: ["Dinner", "Pay your own bill"],
+      inclusions: [
+        "Seat & matching",
+        "Complimentary soft drink",
+        "Food paid at the venue",
+      ],
     },
     {
       venueId: venues[3].id,
@@ -247,13 +259,19 @@ async function seed() {
 
   for (const spec of tableSpecs) {
     const startsAt = atDecember(spec.day, spec.hour, spec.minute ?? 0);
+    // First few nights: bookable now (invite carousel testing).
+    // Later nights: booking unlocks in a few days so Coming up shows a timer.
+    const bookingOpensAt =
+      spec.day <= 7
+        ? bookingOpenNow()
+        : new Date(Date.now() + (spec.day - 5) * 24 * 60 * 60 * 1000);
 
     await prisma.supperTable.create({
       data: {
         venueId: spec.venueId,
         menuId: spec.menuId,
         startsAt,
-        bookingOpensAt: bookingOpenNow(),
+        bookingOpensAt,
         priceTier: spec.tier,
         seatPrice: spec.price,
         status: TableStatus.OPEN,

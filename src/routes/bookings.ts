@@ -69,7 +69,7 @@ async function assertPayableBooking(bookingId: string, userId: string) {
       data: {
         status: BookingStatus.CANCELLED,
         cancelledAt: new Date(),
-        cancelReason: "Payment hold expired",
+        cancelReason: "NYTO",
       },
     });
     throw new AppError("Payment hold expired — create a new booking", 409);
