@@ -13,11 +13,12 @@ const shared: Partial<Options> = {
   message: { error: "Too many requests. Try again shortly." },
 };
 
-/** Requesting a code costs money — keep this tight. */
+/** Requesting a code costs money — keep this tight in production. */
 export const otpRequestLimiter = rateLimit({
   ...shared,
   windowMs: 15 * 60 * 1000,
-  limit: 10,
+  // Dev: don't block clone/onboarding testing. Prod: 10 / 15 min per IP.
+  limit: env.NODE_ENV === "production" ? 10 : 200,
 });
 
 /** Verification is cheap but brute-forceable. */
