@@ -75,19 +75,24 @@ export async function issueOtpChallenge(
     }
   }
 
-  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-  const sendsThisHour = await prisma.otpChallenge.aggregate({
-    where: { channel, destination, createdAt: { gte: oneHourAgo } },
-    _sum: { sendCount: true },
-  });
-  if ((sendsThisHour._sum.sendCount ?? 0) >= env.OTP_MAX_SENDS_PER_HOUR) {
-    throw new AppError(
-      "Too many codes requested. Try again in an hour.",
-      429,
-    );
+  // Fixed test destinations never burn SMS — skip the hourly send cap so
+  // local / clone testing can request codes freely. Production never has
+  // OTP_TEST_DESTINATIONS (testCodeFor returns undefined there).
+  const testCode = testCodeFor(destination);
+  if (!testCode) {
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    const sendsThisHour = await prisma.otpChallenge.aggregate({
+      where: { channel, destination, createdAt: { gte: oneHourAgo } },
+      _sum: { sendCount: true },
+    });
+    if ((sendsThisHour._sum.sendCount ?? 0) >= env.OTP_MAX_SENDS_PER_HOUR) {
+      throw new AppError(
+        "Too many codes requested. Try again in an hour.",
+        429,
+      );
+    }
   }
 
-  const testCode = testCodeFor(destination);
   const code = testCode ?? generateCode();
   const expiresAt = new Date(now.getTime() + env.OTP_TTL_SECONDS * 1000);
   const codeHash = hashCode(channel, destination, code);
