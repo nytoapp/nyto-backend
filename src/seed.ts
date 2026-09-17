@@ -156,7 +156,7 @@ async function seed() {
       price: 1299,
       tableType: NytoTableType.WEEKLY,
       menuId: menu.id,
-      inclusions: ["3-course dinner", "Welcome drink", "Host facilitation"],
+      inclusions: ["3-course dinner", "Welcome drink"],
     },
     {
       venueId: venues[1].id,
