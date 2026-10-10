@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  AuthProvider,
   DietaryPreference,
   GenderPreference,
   HostApplicationStatus,
@@ -27,6 +28,8 @@ import {
   approveHostApplication,
   rejectHostApplication,
 } from "../lib/hostApplications";
+import { findOrCreateEmailUser } from "../lib/identity";
+import { normalizeEmail } from "../lib/otp";
 
 export const adminRouter = Router();
 adminRouter.use(requireAuth, requireRoles(UserRole.ADMIN));
@@ -38,6 +41,88 @@ adminRouter.get("/access-check", (req: AuthedRequest, res) => {
     userId: req.userId,
     role: req.role,
   });
+});
+
+adminRouter.get("/overview", async (_req, res, next) => {
+  try {
+    const [
+      activeVenues,
+      sessions,
+      confirmed,
+      pendingPayment,
+      pendingHosts,
+    ] = await Promise.all([
+      prisma.venue.count({ where: { isActive: true } }),
+      prisma.supperTable.count({
+        where: { status: { not: TableStatus.CANCELLED } },
+      }),
+      prisma.booking.count({ where: { status: "CONFIRMED" } }),
+      prisma.booking.count({ where: { status: "PENDING_PAYMENT" } }),
+      prisma.hostApplication.count({
+        where: { status: HostApplicationStatus.PENDING },
+      }),
+    ]);
+
+    const attention: { id: string; label: string; href: string }[] = [];
+    if (pendingPayment > 0) {
+      attention.push({
+        id: "pending-payments",
+        label: `${pendingPayment} pending payment${pendingPayment === 1 ? "" : "s"}`,
+        href: "/bookings",
+      });
+    }
+    if (pendingHosts > 0) {
+      attention.push({
+        id: "pending-hosts",
+        label: `${pendingHosts} host application${pendingHosts === 1 ? "" : "s"}`,
+        href: "/host-applications",
+      });
+    }
+
+    const [recentBookings, recentPayments] = await Promise.all([
+      prisma.booking.findMany({
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              fullName: true,
+              phone: true,
+              email: true,
+            },
+          },
+          table: { include: { venue: true } },
+          payment: true,
+        },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+      }),
+      prisma.payment.findMany({
+        include: {
+          booking: {
+            include: {
+              table: {
+                include: { venue: { select: { id: true, name: true } } },
+              },
+              user: { select: { id: true, fullName: true, phone: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+      }),
+    ]);
+
+    res.json({
+      ok: true,
+      stats: { activeVenues, sessions, confirmed, pendingPayment },
+      attention,
+      recentBookings,
+      recentPayments,
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 const venueCreateSchema = z.object({
@@ -58,6 +143,8 @@ const menuCreateSchema = z.object({
   dietaryType: z.enum(["VEGETARIAN", "NON_VEGETARIAN", "VEGAN"]),
   costPerHead: z.number().int().min(0),
 });
+
+const menuPatchSchema = menuCreateSchema.partial();
 
 const tableCreateSchema = z.object({
   menuId: z.string().min(1).optional(),
@@ -101,10 +188,16 @@ const tablePatchSchema = z.object({
     .optional(),
 });
 
-const staffAssignSchema = z.object({
-  userId: z.string().min(1),
-  staffRole: z.enum(["OWNER", "MANAGER", "STAFF"]).optional(),
-});
+const staffAssignSchema = z
+  .object({
+    userId: z.string().min(1).optional(),
+    email: z.string().trim().email().optional(),
+    name: z.string().trim().min(1).max(120).optional(),
+    staffRole: z.enum(["OWNER", "MANAGER", "STAFF"]).optional(),
+  })
+  .refine((body) => Boolean(body.userId || body.email), {
+    message: "userId or email is required",
+  });
 
 adminRouter.get("/venues", async (_req, res, next) => {
   try {
@@ -134,6 +227,22 @@ adminRouter.post(
   },
 );
 
+adminRouter.get("/venues/:venueId", async (req, res, next) => {
+  try {
+    const venueId = String(req.params.venueId);
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      include: {
+        _count: { select: { tables: true, staff: true, menus: true } },
+      },
+    });
+    if (!venue) throw new AppError("Venue not found", 404);
+    res.json({ ok: true, venue });
+  } catch (err) {
+    next(err);
+  }
+});
+
 adminRouter.patch(
   "/venues/:venueId",
   validateBody(venuePatchSchema),
@@ -152,6 +261,34 @@ adminRouter.patch(
   },
 );
 
+adminRouter.get("/venues/:venueId/staff", async (req, res, next) => {
+  try {
+    const venueId = String(req.params.venueId);
+    const venue = await prisma.venue.findUnique({ where: { id: venueId } });
+    if (!venue) throw new AppError("Venue not found", 404);
+
+    const staff = await prisma.venueStaff.findMany({
+      where: { venueId, isActive: true },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            role: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json({ ok: true, staff });
+  } catch (err) {
+    next(err);
+  }
+});
+
 adminRouter.post(
   "/venues/:venueId/staff",
   validateBody(staffAssignSchema),
@@ -160,26 +297,46 @@ adminRouter.post(
       const venueId = String(req.params.venueId);
       const body = req.body as z.infer<typeof staffAssignSchema>;
 
-      const [venue, user] = await Promise.all([
-        prisma.venue.findUnique({ where: { id: venueId } }),
-        prisma.user.findUnique({ where: { id: body.userId } }),
-      ]);
+      const venue = await prisma.venue.findUnique({ where: { id: venueId } });
       if (!venue) throw new AppError("Venue not found", 404);
+
+      let user = body.userId
+        ? await prisma.user.findUnique({ where: { id: body.userId } })
+        : null;
+
+      if (!user && body.email) {
+        const email = normalizeEmail(body.email);
+        user = await findOrCreateEmailUser(email);
+        if (body.name?.trim()) {
+          const name = body.name.trim();
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              fullName: name,
+              firstName: name.split(/\s+/)[0] || name,
+            },
+          });
+        }
+      }
+
       if (!user) throw new AppError("User not found", 404);
+      if (user.role === UserRole.ADMIN) {
+        throw new AppError("Cannot assign platform admins as venue staff", 400);
+      }
 
       const staff = await prisma.$transaction(async (tx) => {
-        if (user.role === UserRole.USER) {
+        if (user!.role === UserRole.USER) {
           await tx.user.update({
-            where: { id: user.id },
+            where: { id: user!.id },
             data: { role: UserRole.VENUE_STAFF },
           });
         }
         return tx.venueStaff.upsert({
           where: {
-            userId_venueId: { userId: user.id, venueId },
+            userId_venueId: { userId: user!.id, venueId },
           },
           create: {
-            userId: user.id,
+            userId: user!.id,
             venueId,
             staffRole: (body.staffRole as VenueStaffRole) ?? VenueStaffRole.STAFF,
             isActive: true,
@@ -187,6 +344,18 @@ adminRouter.post(
           update: {
             staffRole: (body.staffRole as VenueStaffRole) ?? undefined,
             isActive: true,
+          },
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                fullName: true,
+                email: true,
+                phone: true,
+                role: true,
+              },
+            },
           },
         });
       });
@@ -236,6 +405,53 @@ adminRouter.post(
     }
   },
 );
+
+adminRouter.patch(
+  "/menus/:menuId",
+  validateBody(menuPatchSchema),
+  async (req, res, next) => {
+    try {
+      const menuId = String(req.params.menuId);
+      const body = req.body as z.infer<typeof menuPatchSchema>;
+      const existing = await prisma.venueMenu.findUnique({ where: { id: menuId } });
+      if (!existing) throw new AppError("Experience not found", 404);
+
+      const menu = await prisma.venueMenu.update({
+        where: { id: menuId },
+        data: {
+          name: body.name,
+          description: body.description,
+          dietaryType: body.dietaryType as DietaryPreference | undefined,
+          costPerHead: body.costPerHead,
+        },
+      });
+      res.json({ ok: true, menu });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+adminRouter.delete("/menus/:menuId", async (req, res, next) => {
+  try {
+    const menuId = String(req.params.menuId);
+    const existing = await prisma.venueMenu.findUnique({ where: { id: menuId } });
+    if (!existing) throw new AppError("Experience not found", 404);
+
+    const inUse = await prisma.supperTable.count({ where: { menuId } });
+    if (inUse > 0) {
+      throw new AppError(
+        "This experience is linked to sessions. Reassign those nights first.",
+        409,
+      );
+    }
+
+    await prisma.venueMenu.delete({ where: { id: menuId } });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 adminRouter.get("/venues/:venueId/tables", async (req, res, next) => {
   try {
@@ -313,6 +529,105 @@ adminRouter.post(
     }
   },
 );
+
+adminRouter.get("/tables", async (req, res, next) => {
+  try {
+    const venueId =
+      typeof req.query.venueId === "string" ? req.query.venueId : undefined;
+    const status =
+      typeof req.query.status === "string" ? req.query.status : undefined;
+
+    const tables = await prisma.supperTable.findMany({
+      where: {
+        ...(venueId ? { venueId } : {}),
+        ...(status && status !== "FULL"
+          ? { status: status as TableStatus }
+          : {}),
+      },
+      include: {
+        menu: true,
+        venue: { select: { id: true, name: true, city: true, area: true } },
+        bookings: {
+          select: { seatsBooked: true, status: true, createdAt: true },
+        },
+      },
+      orderBy: { startsAt: "asc" },
+      take: 200,
+    });
+
+    let mapped = tables.map((t) => {
+      const seatsTaken = seatsHoldingCapacity(t.bookings);
+      const seatsLeft = Math.max(t.capacity - seatsTaken, 0);
+      const { bookings: _bookings, ...rest } = t;
+      return {
+        ...rest,
+        seatsTaken,
+        seatsLeft,
+      };
+    });
+
+    if (status === "FULL") {
+      mapped = mapped.filter(
+        (t) => t.status !== TableStatus.CANCELLED && t.seatsLeft === 0,
+      );
+    } else if (status === "OPEN") {
+      mapped = mapped.filter(
+        (t) => t.status === TableStatus.OPEN && t.seatsLeft > 0,
+      );
+    }
+
+    res.json({ ok: true, tables: mapped });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get("/tables/:tableId/bookings", async (req, res, next) => {
+  try {
+    const tableId = String(req.params.tableId);
+    const table = await prisma.supperTable.findUnique({
+      where: { id: tableId },
+      include: {
+        venue: { select: { id: true, name: true, city: true, area: true } },
+        menu: { select: { id: true, name: true } },
+      },
+    });
+    if (!table) throw new AppError("Table not found", 404);
+
+    const bookings = await prisma.booking.findMany({
+      where: { tableId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            fullName: true,
+            phone: true,
+            email: true,
+          },
+        },
+        payment: true,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    res.json({
+      ok: true,
+      table: {
+        id: table.id,
+        startsAt: table.startsAt,
+        capacity: table.capacity,
+        status: table.status,
+        seatPrice: table.seatPrice,
+        venue: table.venue,
+        menu: table.menu,
+      },
+      bookings,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 adminRouter.patch(
   "/tables/:tableId",
@@ -517,6 +832,136 @@ adminRouter.post(
         reason: body.reason,
       });
       res.json({ ok: true, application });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+adminRouter.get("/guests", async (req, res, next) => {
+  try {
+    const q =
+      typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
+
+    const users = await prisma.user.findMany({
+      where: {
+        role: { in: [UserRole.USER, UserRole.VENUE_STAFF] },
+        ...(q
+          ? {
+              OR: [
+                { fullName: { contains: q, mode: "insensitive" } },
+                { firstName: { contains: q, mode: "insensitive" } },
+                { email: { contains: q, mode: "insensitive" } },
+                { phone: { contains: q } },
+              ],
+            }
+          : {}),
+      },
+      include: {
+        _count: { select: { bookings: true } },
+        bookings: {
+          take: 1,
+          orderBy: { createdAt: "desc" },
+          include: {
+            table: { include: { venue: { select: { name: true } } } },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+
+    res.json({
+      ok: true,
+      guests: users.map((u) => ({
+        id: u.id,
+        name: u.fullName || u.firstName || "Guest",
+        phone: u.phone,
+        email: u.email,
+        bookings: u._count.bookings,
+        lastVenue: u.bookings[0]?.table.venue.name ?? null,
+        status: u._count.bookings > 0 ? "ACTIVE" : "NEW",
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get("/team", async (_req, res, next) => {
+  try {
+    const members = await prisma.user.findMany({
+      where: { role: UserRole.ADMIN },
+      select: {
+        id: true,
+        firstName: true,
+        fullName: true,
+        email: true,
+        role: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json({
+      ok: true,
+      members: members.map((m) => ({
+        id: m.id,
+        name: m.fullName || m.firstName || "Admin",
+        email: m.email,
+        role: m.role,
+        status: "ACTIVE" as const,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const teamInviteSchema = z.object({
+  email: z.string().trim().email(),
+  name: z.string().trim().min(1).max(120),
+});
+
+adminRouter.post(
+  "/team/invite",
+  validateBody(teamInviteSchema),
+  async (req, res, next) => {
+    try {
+      const body = req.body as z.infer<typeof teamInviteSchema>;
+      const email = normalizeEmail(body.email);
+      const name = body.name.trim();
+      const firstName = name.split(/\s+/)[0] || name;
+
+      const existing = await prisma.user.findUnique({ where: { email } });
+      const user = existing
+        ? await prisma.user.update({
+            where: { id: existing.id },
+            data: {
+              role: UserRole.ADMIN,
+              fullName: name,
+              firstName,
+            },
+          })
+        : await prisma.user.create({
+            data: {
+              email,
+              authProvider: AuthProvider.EMAIL,
+              role: UserRole.ADMIN,
+              fullName: name,
+              firstName,
+            },
+          });
+
+      res.status(201).json({
+        ok: true,
+        member: {
+          id: user.id,
+          name: user.fullName || user.firstName || "Admin",
+          email: user.email,
+          role: user.role,
+          status: existing ? ("ACTIVE" as const) : ("INVITED" as const),
+        },
+      });
     } catch (err) {
       next(err);
     }

@@ -112,6 +112,7 @@ bookingsRouter.post(
       const table = await prisma.supperTable.findUnique({
         where: { id: body.tableId },
         include: {
+          venue: { select: { id: true, isActive: true } },
           bookings: {
             select: {
               seatsBooked: true,
@@ -132,6 +133,9 @@ bookingsRouter.post(
         },
       });
       if (!table) throw new AppError("Table not found", 404);
+      if (!table.venue.isActive) {
+        throw new AppError("This venue is not accepting bookings", 403);
+      }
       if (
         table.status !== TableStatus.OPEN &&
         table.status !== TableStatus.MATCHING
