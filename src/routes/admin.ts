@@ -21,7 +21,11 @@ import {
 } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validateBody } from "../middleware/validate";
-import { cancelBookingAsAdmin } from "../lib/bookingLifecycle";
+import {
+  cancelBookingAsAdmin,
+  cancelTableAsAdmin,
+  refundPaymentAsAdmin,
+} from "../lib/bookingLifecycle";
 import { defaultBookingOpensAt } from "../lib/bookingWindow";
 import { genderPreferenceForTableType } from "../lib/tableType";
 import {
@@ -367,6 +371,67 @@ adminRouter.post(
   },
 );
 
+adminRouter.delete(
+  "/venues/:venueId/staff/:staffId",
+  async (req, res, next) => {
+    try {
+      const venueId = String(req.params.venueId);
+      const staffId = String(req.params.staffId);
+
+      const existing = await prisma.venueStaff.findFirst({
+        where: { id: staffId, venueId },
+        include: { user: { select: { id: true, role: true } } },
+      });
+      if (!existing) throw new AppError("Staff assignment not found", 404);
+      if (!existing.isActive) {
+        res.json({ ok: true, staff: existing });
+        return;
+      }
+
+      const staff = await prisma.$transaction(async (tx) => {
+        const deactivated = await tx.venueStaff.update({
+          where: { id: staffId },
+          data: { isActive: false },
+          include: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                fullName: true,
+                email: true,
+                phone: true,
+                role: true,
+              },
+            },
+          },
+        });
+
+        const otherActive = await tx.venueStaff.count({
+          where: {
+            userId: existing.userId,
+            isActive: true,
+          },
+        });
+        if (
+          otherActive === 0 &&
+          existing.user.role === UserRole.VENUE_STAFF
+        ) {
+          await tx.user.update({
+            where: { id: existing.userId },
+            data: { role: UserRole.USER },
+          });
+        }
+
+        return deactivated;
+      });
+
+      res.json({ ok: true, staff });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 adminRouter.get("/venues/:venueId/menus", async (req, res, next) => {
   try {
     const venueId = String(req.params.venueId);
@@ -641,6 +706,20 @@ adminRouter.patch(
       });
       if (!existing) throw new AppError("Table not found", 404);
 
+      if (
+        body.status === "CANCELLED" &&
+        existing.status !== TableStatus.CANCELLED
+      ) {
+        const result = await cancelTableAsAdmin(tableId);
+        res.json({
+          ok: true,
+          table: result.table,
+          cancelledBookings: result.cancelledBookings,
+          refundedPayments: result.refundedPayments,
+        });
+        return;
+      }
+
       if (body.menuId) {
         const menu = await prisma.venueMenu.findFirst({
           where: { id: body.menuId, venueId: existing.venueId },
@@ -679,6 +758,30 @@ adminRouter.patch(
         },
       });
       res.json({ ok: true, table });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+const tableCancelSchema = z.object({
+  reason: z.string().trim().min(1).max(240).optional(),
+});
+
+adminRouter.post(
+  "/tables/:tableId/cancel",
+  validateBody(tableCancelSchema),
+  async (req, res, next) => {
+    try {
+      const tableId = String(req.params.tableId);
+      const body = req.body as z.infer<typeof tableCancelSchema>;
+      const result = await cancelTableAsAdmin(tableId, body.reason);
+      res.json({
+        ok: true,
+        table: result.table,
+        cancelledBookings: result.cancelledBookings,
+        refundedPayments: result.refundedPayments,
+      });
     } catch (err) {
       next(err);
     }
@@ -738,6 +841,25 @@ adminRouter.get("/payments", async (_req, res, next) => {
     next(err);
   }
 });
+
+const paymentRefundSchema = z.object({
+  reason: z.string().trim().min(1).max(240).optional(),
+});
+
+adminRouter.post(
+  "/payments/:paymentId/refund",
+  validateBody(paymentRefundSchema),
+  async (req, res, next) => {
+    try {
+      const paymentId = String(req.params.paymentId);
+      const body = req.body as z.infer<typeof paymentRefundSchema>;
+      const payment = await refundPaymentAsAdmin(paymentId, body.reason);
+      res.json({ ok: true, payment });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 const adminCancelSchema = z.object({
   reason: z.string().trim().min(1).max(240).optional(),
@@ -960,6 +1082,56 @@ adminRouter.post(
           email: user.email,
           role: user.role,
           status: existing ? ("ACTIVE" as const) : ("INVITED" as const),
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+adminRouter.post(
+  "/team/:userId/revoke",
+  async (req: AuthedRequest, res, next) => {
+    try {
+      const userId = String(req.params.userId);
+      if (userId === req.userId) {
+        throw new AppError("You cannot revoke your own admin access", 400);
+      }
+
+      const target = await prisma.user.findUnique({ where: { id: userId } });
+      if (!target) throw new AppError("Admin not found", 404);
+      if (target.role !== UserRole.ADMIN) {
+        throw new AppError("User is not an admin", 409);
+      }
+
+      const adminCount = await prisma.user.count({
+        where: { role: UserRole.ADMIN },
+      });
+      if (adminCount <= 1) {
+        throw new AppError("Cannot revoke the last admin", 409);
+      }
+
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: { role: UserRole.USER },
+        select: {
+          id: true,
+          firstName: true,
+          fullName: true,
+          email: true,
+          role: true,
+        },
+      });
+
+      res.json({
+        ok: true,
+        member: {
+          id: user.id,
+          name: user.fullName || user.firstName || "User",
+          email: user.email,
+          role: user.role,
+          status: "REVOKED" as const,
         },
       });
     } catch (err) {

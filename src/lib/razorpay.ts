@@ -69,3 +69,17 @@ export function verifyRazorpayPaymentSignature(opts: {
     return false;
   }
 }
+
+/** Full (or partial) refund against a captured Razorpay payment id (`pay_…`). */
+export async function refundRazorpayPayment(opts: {
+  paymentId: string;
+  amountInr?: number;
+}): Promise<{ id: string }> {
+  const rz = getRazorpay();
+  const amount =
+    opts.amountInr != null ? inrToPaise(opts.amountInr) : undefined;
+  const refund = (await rz.payments.refund(opts.paymentId, {
+    ...(amount != null ? { amount } : {}),
+  })) as { id: string };
+  return { id: String(refund.id) };
+}
