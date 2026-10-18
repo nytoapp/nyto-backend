@@ -41,6 +41,8 @@ export async function approveHostApplication(opts: {
           city: app.city,
           area: app.area,
           isActive: true,
+          // Host apps become partner-hosted kitchens.
+          hostedBy: "PARTNER",
         },
       });
       venueId = venue.id;

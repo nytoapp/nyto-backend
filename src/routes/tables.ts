@@ -78,6 +78,7 @@ function formatTable(
       address: string;
       city: string;
       area: string | null;
+      hostedBy: "NYTO" | "PARTNER";
     };
     bookings: BookingRow[];
   },
@@ -142,6 +143,8 @@ function formatTable(
     area: selectedArea,
     venueName: table.venue.name,
     city: table.venue.city,
+    /** Who organises this night — from venue; drives guest copy / filters later. */
+    hostedBy: table.venue.hostedBy,
     womenOnly:
       table.tableType === NytoTableType.WOMEN_LED ||
       table.genderPreference === GenderPreference.WOMEN_ONLY,

@@ -22,6 +22,7 @@ import {
 } from "../middleware/auth";
 import { AppError } from "../middleware/errorHandler";
 import { validateBody } from "../middleware/validate";
+import { assertVenuePortalCanPublish } from "../lib/venueHostedBy";
 
 export const venueRouter = Router();
 venueRouter.use(requireAuth, requireRoles(UserRole.VENUE_STAFF, UserRole.ADMIN));
@@ -136,6 +137,10 @@ venueRouter.post(
     try {
       const venueId = String(req.params.venueId);
       const body = req.body as z.infer<typeof menuCreateSchema>;
+      const venue = await prisma.venue.findUnique({ where: { id: venueId } });
+      if (!venue) throw new AppError("Venue not found", 404);
+      assertVenuePortalCanPublish(venue);
+
       const menu = await prisma.venueMenu.create({
         data: {
           venueId,
@@ -201,6 +206,9 @@ venueRouter.post(
     try {
       const venueId = String(req.params.venueId);
       const body = req.body as z.infer<typeof tableCreateSchema>;
+      const venue = await prisma.venue.findUnique({ where: { id: venueId } });
+      if (!venue) throw new AppError("Venue not found", 404);
+      assertVenuePortalCanPublish(venue);
 
       if (body.menuId) {
         const menu = await prisma.venueMenu.findFirst({
