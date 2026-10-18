@@ -116,6 +116,13 @@ enum PriceTier {
   EVENING
 }
 
+/// Who organises nights at this venue. Never mixed.
+/// NYTO → admin publishes packages. PARTNER → venue dashboard publishes; admin is view-only.
+enum VenueHostedBy {
+  NYTO
+  PARTNER
+}
+
 enum GenderPreference {
   BALANCED
   WOMEN_ONLY
@@ -270,6 +277,8 @@ model Venue {
   lat         Float?
   lng         Float?
   isActive    Boolean  @default(true)
+  /// NYTO curated vs partner-hosted. Drives who may publish menus/nights.
+  hostedBy    VenueHostedBy @default(NYTO)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -279,6 +288,7 @@ model Venue {
   hostApplications HostApplication[]
 
   @@index([city, area])
+  @@index([hostedBy, isActive])
   @@map("venues")
 }
 

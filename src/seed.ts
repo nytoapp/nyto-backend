@@ -94,6 +94,8 @@ async function seed() {
         area: "Ameerpet",
         lat: 17.4375,
         lng: 78.4482,
+        // Partner kitchen — packages come from their dashboard; admin is view-only.
+        hostedBy: "PARTNER",
       },
     }),
     prisma.venue.create({
