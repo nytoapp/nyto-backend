@@ -1,10 +1,12 @@
 import { Router } from "express";
 import {
   AuthProvider,
+  BookingStatus,
   DietaryPreference,
   GenderPreference,
   HostApplicationStatus,
   NytoTableType,
+  PaymentStatus,
   PriceTier,
   TablePaymentType,
   TableStatus,
@@ -14,6 +16,13 @@ import {
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { seatsHoldingCapacity } from "../lib/bookingSeats";
+import {
+  ELIGIBLE_NIGHT_STATUSES,
+  OVERVIEW_UPCOMING_DAYS,
+  SEATS_SOLD_BOOKING_STATUSES,
+  occupancyPercent,
+  overviewWindowEnd,
+} from "../lib/adminOverviewMetrics";
 import {
   requireAuth,
   requireRoles,
@@ -50,41 +59,63 @@ adminRouter.get("/access-check", (req: AuthedRequest, res) => {
 
 adminRouter.get("/overview", async (_req, res, next) => {
   try {
+    const now = new Date();
+    const windowEnd = overviewWindowEnd(now);
+
+    const upcomingNightWhere = {
+      status: { in: ELIGIBLE_NIGHT_STATUSES },
+      startsAt: { gt: now, lt: windowEnd },
+    };
+
     const [
-      activeVenues,
-      sessions,
-      confirmed,
-      pendingPayment,
+      upcomingNights,
+      confirmedBookingsUpcoming,
+      seatsAgg,
+      capacityAgg,
+      paymentsPending,
+      paymentsFailed,
       pendingHosts,
+      capturedSum,
+      pendingSum,
+      refundedSum,
+      recentBookings,
+      recentPayments,
     ] = await Promise.all([
-      prisma.venue.count({ where: { isActive: true } }),
-      prisma.supperTable.count({
-        where: { status: { not: TableStatus.CANCELLED } },
+      prisma.supperTable.count({ where: upcomingNightWhere }),
+      prisma.booking.count({
+        where: {
+          status: BookingStatus.CONFIRMED,
+          table: upcomingNightWhere,
+        },
       }),
-      prisma.booking.count({ where: { status: "CONFIRMED" } }),
-      prisma.booking.count({ where: { status: "PENDING_PAYMENT" } }),
+      prisma.booking.aggregate({
+        where: {
+          status: { in: SEATS_SOLD_BOOKING_STATUSES },
+          table: upcomingNightWhere,
+        },
+        _sum: { seatsBooked: true },
+      }),
+      prisma.supperTable.aggregate({
+        where: upcomingNightWhere,
+        _sum: { capacity: true },
+      }),
+      prisma.payment.count({ where: { status: PaymentStatus.PENDING } }),
+      prisma.payment.count({ where: { status: PaymentStatus.FAILED } }),
       prisma.hostApplication.count({
         where: { status: HostApplicationStatus.PENDING },
       }),
-    ]);
-
-    const attention: { id: string; label: string; href: string }[] = [];
-    if (pendingPayment > 0) {
-      attention.push({
-        id: "pending-payments",
-        label: `${pendingPayment} pending payment${pendingPayment === 1 ? "" : "s"}`,
-        href: "/bookings",
-      });
-    }
-    if (pendingHosts > 0) {
-      attention.push({
-        id: "pending-hosts",
-        label: `${pendingHosts} host application${pendingHosts === 1 ? "" : "s"}`,
-        href: "/host-applications",
-      });
-    }
-
-    const [recentBookings, recentPayments] = await Promise.all([
+      prisma.payment.aggregate({
+        where: { status: PaymentStatus.CAPTURED },
+        _sum: { amount: true },
+      }),
+      prisma.payment.aggregate({
+        where: { status: PaymentStatus.PENDING },
+        _sum: { amount: true },
+      }),
+      prisma.payment.aggregate({
+        where: { status: PaymentStatus.REFUNDED },
+        _sum: { amount: true },
+      }),
       prisma.booking.findMany({
         include: {
           user: {
@@ -118,9 +149,70 @@ adminRouter.get("/overview", async (_req, res, next) => {
       }),
     ]);
 
+    const seatsSold = seatsAgg._sum.seatsBooked ?? 0;
+    const seatsCapacity = capacityAgg._sum.capacity ?? 0;
+    const occupancyPct = occupancyPercent(seatsSold, seatsCapacity);
+
+    const attention: {
+      id: string;
+      label: string;
+      href: string;
+      entity: string;
+      count: number;
+    }[] = [];
+
+    if (pendingHosts > 0) {
+      attention.push({
+        id: "pending-hosts",
+        label: `${pendingHosts} host application${pendingHosts === 1 ? "" : "s"} awaiting review`,
+        href: "/host-applications?status=PENDING",
+        entity: "HostApplication",
+        count: pendingHosts,
+      });
+    }
+    if (paymentsFailed > 0) {
+      attention.push({
+        id: "failed-payments",
+        label: `${paymentsFailed} failed payment${paymentsFailed === 1 ? "" : "s"}`,
+        href: "/payments?status=FAILED",
+        entity: "Payment",
+        count: paymentsFailed,
+      });
+    }
+    if (paymentsPending > 0) {
+      attention.push({
+        id: "pending-payments",
+        label: `${paymentsPending} payment${paymentsPending === 1 ? "" : "s"} pending`,
+        href: "/payments?status=PENDING",
+        entity: "Payment",
+        count: paymentsPending,
+      });
+    }
+
     res.json({
       ok: true,
-      stats: { activeVenues, sessions, confirmed, pendingPayment },
+      scope: {
+        timezone: "Asia/Kolkata",
+        upcomingWindowDays: OVERVIEW_UPCOMING_DAYS,
+        asOf: now.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+      },
+      stats: {
+        upcomingNights,
+        confirmedBookingsUpcoming,
+        seatsSold,
+        seatsCapacity,
+        occupancyPct,
+        paymentsPending,
+        paymentsFailed,
+      },
+      finance: {
+        currency: "INR",
+        /** Current ledger: CAPTURED payments still held (status mutates on refund). */
+        capturedAmount: capturedSum._sum.amount ?? 0,
+        pendingAmount: pendingSum._sum.amount ?? 0,
+        refundedAmount: refundedSum._sum.amount ?? 0,
+      },
       attention,
       recentBookings,
       recentPayments,
