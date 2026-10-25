@@ -12,6 +12,10 @@ import { isHoldingStatus, seatsHoldingCapacity } from "../lib/bookingSeats";
 import { isBookingOpen, istCalendarDate } from "../lib/bookingWindow";
 import { isInstantTable } from "../lib/instantTable";
 import {
+  isBelowMinToRun,
+  paidSeatsForRun,
+} from "../lib/tableUnderfill";
+import {
   LAUNCH_CITY,
   areasForFilter,
 } from "../lib/hyderabadAreas";
@@ -86,12 +90,14 @@ function formatTable(
 ) {
   const seatsTaken = seatsHoldingCapacity(table.bookings);
   const seatsLeft = Math.max(table.capacity - seatsTaken, 0);
+  const paidSeats = paidSeatsForRun(table.bookings);
   const bookable = isBookingOpen(table.bookingOpensAt, table.startsAt, now);
   const instant = isInstantTable(
     table.startsAt,
     seatsLeft,
     bookable,
     now,
+    paidSeats,
   );
   const selectedArea =
     table.venue.area?.trim() ||
@@ -126,6 +132,9 @@ function formatTable(
     bookingOpensAt: table.bookingOpensAt.toISOString(),
     bookable,
     instant,
+    /** Paid seats still below min-to-run (3) — may appear in Instant for fill. */
+    underfilled: isBelowMinToRun(paidSeats),
+    paidSeats,
     seatPrice: table.seatPrice,
     priceTier: table.priceTier,
     tableType: table.tableType,

@@ -11,9 +11,16 @@ import {
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { seatsHoldingCapacity } from "../lib/bookingSeats";
-import { checkInByCode } from "../lib/bookingLifecycle";
+import {
+  cancelTableAsAdmin,
+  checkInByCode,
+} from "../lib/bookingLifecycle";
 import { defaultBookingOpensAt } from "../lib/bookingWindow";
 import { genderPreferenceForTableType } from "../lib/tableType";
+import {
+  paidSeatsForRun,
+  venueMayCancelUnderfill,
+} from "../lib/tableUnderfill";
 import {
   requireAuth,
   requireRoles,
@@ -177,6 +184,7 @@ venueRouter.get(
         ok: true,
         tables: tables.map((t) => {
           const seatsTaken = seatsHoldingCapacity(t.bookings);
+          const paidSeats = paidSeatsForRun(t.bookings);
           return {
             id: t.id,
             venueId: t.venueId,
@@ -186,9 +194,24 @@ venueRouter.get(
             capacity: t.capacity,
             status: t.status,
             genderPreference: t.genderPreference,
-            menu: t.menu,
+            tableType: t.tableType,
+            paymentType: t.paymentType,
+            vibeCopy: t.vibeCopy,
+            inclusions: t.inclusions ?? [],
+            menu: t.menu
+              ? {
+                  id: t.menu.id,
+                  name: t.menu.name,
+                  description: t.menu.description,
+                  dietaryType: t.menu.dietaryType,
+                }
+              : null,
             seatsTaken,
             seatsLeft: Math.max(t.capacity - seatsTaken, 0),
+            paidSeats,
+            /** Below min-to-run (3) — Instant fill boost + venue may cancel/refund. */
+            underfilled: paidSeats < 3,
+            minSeatsToRun: 3,
           };
         }),
       });
@@ -274,14 +297,41 @@ venueRouter.patch(
       if (!existing) throw new AppError("Table not found", 404);
 
       if (body.status === "CANCELLED") {
+        const paidSeats = paidSeatsForRun(existing.bookings);
+        const hasAttended = existing.bookings.some(
+          (b) => b.status === "ATTENDED",
+        );
         const hasPaid = existing.bookings.some(
           (b) => b.status === "CONFIRMED" || b.status === "ATTENDED",
         );
+
+        /**
+         * Underfill cancel: paid seats < 3 → venue may cancel + refund
+         * (same path as admin). Otherwise paid nights stay admin-only.
+         */
         if (hasPaid) {
-          throw new AppError(
-            "Cannot cancel a table with paid bookings — contact NYTO admin",
-            409,
+          if (
+            !venueMayCancelUnderfill({
+              paidSeats,
+              hasAttended,
+            })
+          ) {
+            throw new AppError(
+              "Cannot cancel — table has 3+ paid seats (or guests checked in). Contact NYTO admin.",
+              409,
+            );
+          }
+          const result = await cancelTableAsAdmin(
+            tableId,
+            "Venue cancelled — fewer than 3 paid seats (underfill)",
           );
+          return res.json({
+            ok: true,
+            table: result.table,
+            underfillCancel: true,
+            cancelledBookings: result.cancelledBookings,
+            refundedPayments: result.refundedPayments,
+          });
         }
       }
 
@@ -356,6 +406,11 @@ venueRouter.get(
               startsAt: true,
               status: true,
               seatPrice: true,
+              tableType: true,
+              paymentType: true,
+              vibeCopy: true,
+              capacity: true,
+              menu: { select: { id: true, name: true } },
             },
           },
           payment: true,
@@ -375,7 +430,18 @@ venueRouter.get(
           amountPaid: b.amountPaid,
           paidAt: b.paidAt,
           user: b.user,
-          table: b.table,
+          table: {
+            id: b.table.id,
+            startsAt: b.table.startsAt,
+            status: b.table.status,
+            seatPrice: b.table.seatPrice,
+            tableType: b.table.tableType,
+            paymentType: b.table.paymentType,
+            vibeCopy: b.table.vibeCopy,
+            capacity: b.table.capacity,
+            menuName: b.table.menu?.name ?? null,
+            menuId: b.table.menu?.id ?? null,
+          },
           payment: b.payment
             ? {
                 id: b.payment.id,
