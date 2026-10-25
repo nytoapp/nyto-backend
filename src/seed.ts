@@ -323,22 +323,30 @@ async function seed() {
     update: { role: UserRole.ADMIN },
   });
 
+  const partnerVenue = venues.find((v) => v.hostedBy === "PARTNER") ?? venues[2];
+
   const venueOwner = await prisma.user.upsert({
     where: { email: "venue@nyto.app" },
     create: {
       email: "venue@nyto.app",
       authProvider: AuthProvider.EMAIL,
       role: UserRole.VENUE_STAFF,
-      firstName: "SkyGarden",
-      fullName: "SkyGarden Staff",
+      firstName: "Ameerpet",
+      fullName: "Ameerpet Kitchen",
     },
-    update: { role: UserRole.VENUE_STAFF },
+    update: {
+      role: UserRole.VENUE_STAFF,
+      firstName: "Ameerpet",
+      fullName: "Ameerpet Kitchen",
+    },
   });
 
+  // Partner portal login owns the PARTNER venue only (not NYTO-curated kitchens).
+  await prisma.venueStaff.deleteMany({ where: { userId: venueOwner.id } });
   await prisma.venueStaff.create({
     data: {
       userId: venueOwner.id,
-      venueId: venues[0].id,
+      venueId: partnerVenue.id,
       staffRole: VenueStaffRole.OWNER,
     },
   });
@@ -348,7 +356,7 @@ async function seed() {
   );
   console.log(`  admin:  ${admin.email} (${admin.role})`);
   console.log(
-    `  venue:  ${venueOwner.email} (${venueOwner.role}) → ${venues[0].name}`,
+    `  venue:  ${venueOwner.email} (${venueOwner.role}) → ${partnerVenue.name} (${partnerVenue.hostedBy})`,
   );
 }
 

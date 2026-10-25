@@ -42,6 +42,7 @@ import {
   rejectHostApplication,
 } from "../lib/hostApplications";
 import { findOrCreateEmailUser } from "../lib/identity";
+import { getTableChatWindow } from "../lib/tableChat";
 import { assertAdminCanPublish } from "../lib/venueHostedBy";
 import { normalizeEmail } from "../lib/otp";
 
@@ -1158,6 +1159,41 @@ adminRouter.post(
   },
 );
 
+function guestProfilePayload(u: {
+  id: string;
+  fullName: string | null;
+  firstName: string | null;
+  phone: string | null;
+  email: string | null;
+  gender: string | null;
+  dateOfBirth: Date | null;
+  socialEnergy: string | null;
+  conversationStyle: string | null;
+  tableOneLiner: string | null;
+  datingIntent: string | null;
+  interests: string[];
+  _count: { bookings: number };
+  bookings: { table: { venue: { name: string } } }[];
+}) {
+  return {
+    id: u.id,
+    name: u.fullName || u.firstName || "Guest",
+    phone: u.phone,
+    email: u.email,
+    bookings: u._count.bookings,
+    lastVenue: u.bookings[0]?.table.venue.name ?? null,
+    status: u._count.bookings > 0 ? "ACTIVE" : "NEW",
+    /** App onboarding + table-profile fields (null/[] when guest skipped). */
+    gender: u.gender,
+    dateOfBirth: u.dateOfBirth?.toISOString() ?? null,
+    socialEnergy: u.socialEnergy,
+    conversationStyle: u.conversationStyle,
+    tableOneLiner: u.tableOneLiner,
+    datingIntent: u.datingIntent,
+    interests: u.interests ?? [],
+  };
+}
+
 adminRouter.get("/guests", async (req, res, next) => {
   try {
     const q =
@@ -1194,15 +1230,92 @@ adminRouter.get("/guests", async (req, res, next) => {
 
     res.json({
       ok: true,
-      guests: users.map((u) => ({
-        id: u.id,
-        name: u.fullName || u.firstName || "Guest",
-        phone: u.phone,
-        email: u.email,
-        bookings: u._count.bookings,
-        lastVenue: u.bookings[0]?.table.venue.name ?? null,
-        status: u._count.bookings > 0 ? "ACTIVE" : "NEW",
-      })),
+      guests: users.map((u) => guestProfilePayload(u)),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get("/guests/:id", async (req, res, next) => {
+  try {
+    const user = await prisma.user.findFirst({
+      where: { id: req.params.id, role: UserRole.USER },
+      include: {
+        _count: { select: { bookings: true } },
+        bookings: {
+          take: 1,
+          orderBy: { createdAt: "desc" },
+          include: {
+            table: { include: { venue: { select: { name: true } } } },
+          },
+        },
+      },
+    });
+    if (!user) throw new AppError(404, "Guest not found");
+
+    /** Same table groups the guest sees in the NYTO app (TableMember). */
+    const memberships = await prisma.tableMember.findMany({
+      where: { userId: user.id },
+      include: {
+        table: {
+          include: {
+            venue: { select: { id: true, name: true, city: true, area: true } },
+            menu: { select: { name: true } },
+            members: {
+              include: {
+                user: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    fullName: true,
+                  },
+                },
+              },
+              orderBy: { createdAt: "asc" },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const tableGroups = memberships.map((m) => {
+      const table = m.table;
+      const chat = getTableChatWindow(table);
+      const activeInApp =
+        chat.state === "ACTIVE" || chat.state === "GRACE_PERIOD";
+      return {
+        tableId: table.id,
+        venueId: table.venue.id,
+        venueName: table.venue.name,
+        city: table.venue.city,
+        area: table.venue.area,
+        startsAt: table.startsAt.toISOString(),
+        tableType: table.tableType,
+        paymentType: table.paymentType,
+        tableStatus: table.status,
+        menuName: table.menu?.name ?? null,
+        capacity: table.capacity,
+        memberCount: table.members.length,
+        /** Chat still open in the guest app (active or grace). */
+        activeInApp,
+        chatState: chat.state,
+        attended: m.attended,
+        joinedAt: m.createdAt.toISOString(),
+        members: table.members.map((mem) => ({
+          userId: mem.user.id,
+          name: mem.user.fullName || mem.user.firstName || "Guest",
+          isSelf: mem.user.id === user.id,
+          attended: mem.attended,
+        })),
+      };
+    });
+
+    res.json({
+      ok: true,
+      guest: guestProfilePayload(user),
+      tableGroups,
     });
   } catch (err) {
     next(err);
