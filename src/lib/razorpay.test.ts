@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 import crypto from "crypto";
-import { inrToPaise } from "./razorpay";
+import {
+  inrToPaise,
+  isSyntheticRazorpayPaymentRef,
+} from "./razorpay";
 
 describe("inrToPaise", () => {
   it("converts rupees to paise", () => {
     expect(inrToPaise(1299)).toBe(129900);
     expect(inrToPaise(0)).toBe(0);
+  });
+});
+
+describe("isSyntheticRazorpayPaymentRef", () => {
+  it("flags E2E fake pay_ ids only", () => {
+    expect(isSyntheticRazorpayPaymentRef("pay_e2e_123")).toBe(true);
+    expect(isSyntheticRazorpayPaymentRef("pay_ABC123real")).toBe(false);
+    expect(isSyntheticRazorpayPaymentRef(null)).toBe(false);
   });
 });
 

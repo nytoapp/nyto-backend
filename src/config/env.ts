@@ -77,9 +77,13 @@ const envSchema = z.object({
    */
   ANDROID_SMS_APP_HASH: optionalString,
 
-  // ── Email OTP ───────────────────────────────────────────────────────────
+  // ── Email OTP / transactional ───────────────────────────────────────────
   RESEND_API_KEY: optionalString,
   RESEND_FROM_EMAIL: optionalString.pipe(z.string().email().optional()),
+  /** Public venue portal URL used in host-approval emails. */
+  VENUE_WEB_URL: z.string().url().default("http://localhost:3002"),
+  /** Public admin console URL used in team-invite emails. */
+  ADMIN_WEB_URL: z.string().url().default("http://localhost:3001"),
 
   // ── Social providers ────────────────────────────────────────────────────
   /** Google OAuth client IDs (Web + Android + iOS), comma-separated. */

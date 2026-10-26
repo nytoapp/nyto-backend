@@ -6,6 +6,21 @@ export function isRazorpayConfigured(): boolean {
   return Boolean(env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET);
 }
 
+/** True when KEY_ID is a Razorpay test key (`rzp_test_…`). */
+export function isRazorpayTestMode(): boolean {
+  return Boolean(env.RAZORPAY_KEY_ID?.startsWith("rzp_test_"));
+}
+
+/**
+ * Synthetic E2E confirm ids — not real PSP payments. Refund API will fail;
+ * ledger-only (or STUB rewrite in tests) is required.
+ */
+export function isSyntheticRazorpayPaymentRef(
+  providerRef: string | null | undefined,
+): boolean {
+  return Boolean(providerRef?.startsWith("pay_e2e_"));
+}
+
 export function paymentMode(): "razorpay" | "stub" {
   return isRazorpayConfigured() ? "razorpay" : "stub";
 }

@@ -7,9 +7,14 @@ import {
   type Prisma,
 } from "@prisma/client";
 import { prisma } from "./prisma";
-import { seatsHoldingCapacity } from "./bookingSeats";
+import {
+  isPendingHoldExpired,
+  seatsHoldingCapacity,
+} from "./bookingSeats";
 import { generateCheckInCode } from "./checkInCode";
+import { expireStalePendingHolds } from "./expireStalePendingHolds";
 import { moneyFor } from "./pricing";
+import { lockSupperTableForInventory } from "./tableInventoryLock";
 import { AppError } from "../middleware/errorHandler";
 
 type Tx = Prisma.TransactionClient;
@@ -70,9 +75,58 @@ export async function captureBookingPayment(opts: {
     throw new AppError("Booking is not awaiting payment");
   }
 
+  if (isPendingHoldExpired(booking.createdAt)) {
+    await expireStalePendingHolds({ bookingIds: [booking.id] });
+    throw new AppError(
+      "Payment hold expired — create a new booking to reserve seats",
+      409,
+    );
+  }
+
+  if (
+    booking.table.status !== TableStatus.OPEN &&
+    booking.table.status !== TableStatus.MATCHING
+  ) {
+    throw new AppError("This table is not open for booking", 409);
+  }
+
   const money = moneyFor(booking.table.seatPrice, booking.seatsBooked);
 
   const updated = await prisma.$transaction(async (tx) => {
+    try {
+      await lockSupperTableForInventory(tx, booking.tableId);
+    } catch (err) {
+      if (err instanceof Error && err.message === "TABLE_LOCK_MISS") {
+        throw new AppError("Table not found", 404);
+      }
+      throw err;
+    }
+
+    const fresh = await tx.booking.findUnique({
+      where: { id: booking.id },
+      include: { table: true },
+    });
+    if (!fresh) throw new AppError("Booking not found", 404);
+    if (fresh.status !== BookingStatus.PENDING_PAYMENT) {
+      throw new AppError(
+        "Booking is no longer awaiting payment — refresh and try again",
+        409,
+      );
+    }
+    if (isPendingHoldExpired(fresh.createdAt)) {
+      await expireStalePendingHolds({ bookingIds: [booking.id], tx });
+      throw new AppError(
+        "Payment hold expired — create a new booking to reserve seats",
+        409,
+      );
+    }
+    if (
+      fresh.table.status !== TableStatus.OPEN &&
+      fresh.table.status !== TableStatus.MATCHING
+    ) {
+      throw new AppError("This table is not open for booking", 409);
+    }
+
     const peers = await tx.booking.findMany({
       where: {
         tableId: booking.tableId,
@@ -81,7 +135,7 @@ export async function captureBookingPayment(opts: {
       select: { seatsBooked: true, status: true, createdAt: true },
     });
     const taken = seatsHoldingCapacity(peers);
-    if (taken + booking.seatsBooked > booking.table.capacity) {
+    if (taken + fresh.seatsBooked > fresh.table.capacity) {
       throw new AppError("Not enough seats left on this table", 409);
     }
 
@@ -153,7 +207,7 @@ export async function captureBookingPayment(opts: {
     });
 
     const confirmedTaken = confirmedSeats._sum.seatsBooked ?? 0;
-    if (confirmedTaken >= booking.table.capacity) {
+    if (confirmedTaken >= fresh.table.capacity) {
       await tx.supperTable.update({
         where: { id: booking.tableId },
         data: { status: TableStatus.MATCHING },

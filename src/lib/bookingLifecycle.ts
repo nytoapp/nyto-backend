@@ -6,7 +6,12 @@ import {
 import { prisma } from "./prisma";
 import { AppError } from "../middleware/errorHandler";
 import { seatsHoldingCapacity } from "./bookingSeats";
-import { issueProviderRefund } from "./paymentRefund";
+import {
+  emitBookingCancelled,
+  emitDoorCheckedIn,
+  emitInventorySeats,
+} from "./opsEvents";
+import { claimAndRefundPayment } from "./paymentRefund";
 
 async function refreshTableOpenStatus(tableId: string): Promise<void> {
   const table = await prisma.supperTable.findUnique({
@@ -42,27 +47,19 @@ async function refreshTableOpenStatus(tableId: string): Promise<void> {
       data: { status: nextStatus },
     });
   }
+
+  emitInventorySeats({
+    tableId,
+    venueId: table.venueId,
+    seatsTaken: Math.min(taken, table.capacity),
+    seatsLeft: Math.max(table.capacity - taken, 0),
+    status: nextStatus,
+  });
 }
 
 function adminCancelReason(reason?: string): string {
   const trimmed = reason?.trim();
   return trimmed ? `NYTO: ${trimmed.slice(0, 220)}` : "NYTO";
-}
-
-async function markPaymentOnCancel(
-  paymentId: string,
-  status: "REFUNDED" | "FAILED",
-): Promise<void> {
-  await prisma.payment.update({
-    where: { id: paymentId },
-    data: {
-      status:
-        status === "REFUNDED"
-          ? PaymentStatus.REFUNDED
-          : PaymentStatus.FAILED,
-      ...(status === "REFUNDED" ? { refundedAt: new Date() } : {}),
-    },
-  });
 }
 
 export async function cancelBookingAsUser(
@@ -92,7 +89,7 @@ export async function cancelBookingAsUser(
   }
 
   if (booking.payment?.status === PaymentStatus.CAPTURED) {
-    await issueProviderRefund(booking.payment);
+    await claimAndRefundPayment(booking.payment);
   }
 
   return prisma
@@ -110,15 +107,8 @@ export async function cancelBookingAsUser(
         },
       });
 
-      if (booking.payment?.status === PaymentStatus.CAPTURED) {
-        await tx.payment.update({
-          where: { id: booking.payment.id },
-          data: {
-            status: PaymentStatus.REFUNDED,
-            refundedAt: new Date(),
-          },
-        });
-      } else if (booking.payment?.status === PaymentStatus.PENDING) {
+      // CAPTURED already claimed→REFUNDED by claimAndRefundPayment.
+      if (booking.payment?.status === PaymentStatus.PENDING) {
         await tx.payment.update({
           where: { id: booking.payment.id },
           data: { status: PaymentStatus.FAILED },
@@ -133,6 +123,12 @@ export async function cancelBookingAsUser(
     })
     .then(async (updated) => {
       await refreshTableOpenStatus(booking.tableId);
+      emitBookingCancelled({
+        bookingId: updated.id,
+        tableId: booking.tableId,
+        venueId: updated.table.venueId,
+        userId: booking.userId,
+      });
       return updated;
     });
 }
@@ -154,7 +150,7 @@ export async function cancelBookingAsAdmin(
   }
 
   if (booking.payment?.status === PaymentStatus.CAPTURED) {
-    await issueProviderRefund(booking.payment);
+    await claimAndRefundPayment(booking.payment);
   }
 
   return prisma
@@ -175,15 +171,8 @@ export async function cancelBookingAsAdmin(
         },
       });
 
-      if (booking.payment?.status === PaymentStatus.CAPTURED) {
-        await tx.payment.update({
-          where: { id: booking.payment.id },
-          data: {
-            status: PaymentStatus.REFUNDED,
-            refundedAt: new Date(),
-          },
-        });
-      } else if (booking.payment?.status === PaymentStatus.PENDING) {
+      // CAPTURED already claimed→REFUNDED by claimAndRefundPayment.
+      if (booking.payment?.status === PaymentStatus.PENDING) {
         await tx.payment.update({
           where: { id: booking.payment.id },
           data: { status: PaymentStatus.FAILED },
@@ -198,6 +187,12 @@ export async function cancelBookingAsAdmin(
     })
     .then(async (updated) => {
       await refreshTableOpenStatus(booking.tableId);
+      emitBookingCancelled({
+        bookingId: updated.id,
+        tableId: booking.tableId,
+        venueId: updated.table.venueId,
+        userId: booking.userId,
+      });
       return updated;
     });
 }
@@ -310,8 +305,7 @@ export async function refundPaymentAsAdmin(
   if (bookingOpen) {
     await cancelBookingAsAdmin(booking.id, reason ?? "Refund");
   } else {
-    await issueProviderRefund(payment);
-    await markPaymentOnCancel(payment.id, "REFUNDED");
+    await claimAndRefundPayment(payment);
   }
 
   return prisma.payment.findUniqueOrThrow({
@@ -398,6 +392,14 @@ export async function checkInByCode(input: {
     });
 
     return next;
+  });
+
+  emitDoorCheckedIn({
+    bookingId: updated.id,
+    tableId: updated.tableId,
+    venueId: updated.table.venueId,
+    userId: updated.userId,
+    status: "ATTENDED",
   });
 
   return { alreadyCheckedIn: false, booking: updated };

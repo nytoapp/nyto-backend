@@ -8,7 +8,10 @@ import {
   TableStatus,
 } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { isHoldingStatus, seatsHoldingCapacity } from "../lib/bookingSeats";
+import {
+  isActivelyHoldingSeat,
+  seatsHoldingCapacity,
+} from "../lib/bookingSeats";
 import { isBookingOpen, istCalendarDate } from "../lib/bookingWindow";
 import { isInstantTable } from "../lib/instantTable";
 import {
@@ -44,13 +47,13 @@ type BookingRow = {
   user?: { gender: string | null } | null;
 };
 
-function fillCounts(bookings: BookingRow[]) {
+function fillCounts(bookings: BookingRow[], now = new Date()) {
   let women = 0;
   let men = 0;
   let other = 0;
   let coupleUnits = 0;
   for (const b of bookings) {
-    if (!isHoldingStatus(b.status)) continue;
+    if (!isActivelyHoldingSeat(b, now)) continue;
     if (b.bookingType === "COUPLE") {
       coupleUnits += Math.floor(b.seatsBooked / 2);
       continue;
@@ -103,7 +106,7 @@ function formatTable(
     table.venue.area?.trim() ||
     table.venue.address.split(",")[0]?.trim() ||
     table.venue.city;
-  const fill = fillCounts(table.bookings);
+  const fill = fillCounts(table.bookings, now);
 
   const weekday = table.startsAt.toLocaleDateString("en-GB", {
     weekday: "short",

@@ -2,8 +2,12 @@ import { Router } from "express";
 import {
   DietaryPreference,
   GenderPreference,
+  MenuPublishStatus,
   NytoTableType,
   PriceTier,
+  SupportCategory,
+  SupportSource,
+  SupportStatus,
   TablePaymentType,
   TableStatus,
   UserRole,
@@ -30,6 +34,7 @@ import {
 import { AppError } from "../middleware/errorHandler";
 import { validateBody } from "../middleware/validate";
 import { assertVenuePortalCanPublish } from "../lib/venueHostedBy";
+import { expireStalePendingHolds } from "../lib/expireStalePendingHolds";
 
 export const venueRouter = Router();
 venueRouter.use(requireAuth, requireRoles(UserRole.VENUE_STAFF, UserRole.ADMIN));
@@ -108,11 +113,23 @@ const tablePatchSchema = z.object({
   status: z.enum(["OPEN", "CANCELLED"]).optional(),
 });
 
+const tableTypeEnum = z.enum(["WEEKLY", "WOMEN_LED", "COUPLES", "SINGLES"]);
+
 const menuCreateSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(500).optional(),
   dietaryType: z.enum(["VEGETARIAN", "NON_VEGETARIAN", "VEGAN"]),
   costPerHead: z.number().int().min(0),
+  publishStatus: z.enum(["DRAFT", "PUBLISHED"]).optional(),
+  categories: z.array(tableTypeEnum).max(4).optional(),
+});
+
+const menuPatchSchema = menuCreateSchema.partial();
+
+const supportCreateSchema = z.object({
+  subject: z.string().trim().min(1).max(160),
+  category: z.enum(["DOOR", "BOOKING", "NIGHT", "PAYMENT", "OTHER"]),
+  message: z.string().trim().min(1).max(2000),
 });
 
 const checkInSchema = z.object({
@@ -155,9 +172,93 @@ venueRouter.post(
           description: body.description,
           dietaryType: body.dietaryType as DietaryPreference,
           costPerHead: body.costPerHead,
+          publishStatus:
+            (body.publishStatus as MenuPublishStatus | undefined) ??
+            MenuPublishStatus.DRAFT,
+          categories: (body.categories as NytoTableType[] | undefined) ?? [],
         },
       });
       res.status(201).json({ ok: true, menu });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+venueRouter.patch(
+  "/:venueId/menus/:menuId",
+  requireVenueAccess("params", "venueId"),
+  validateBody(menuPatchSchema),
+  async (req, res, next) => {
+    try {
+      const venueId = String(req.params.venueId);
+      const menuId = String(req.params.menuId);
+      const body = req.body as z.infer<typeof menuPatchSchema>;
+      const venue = await prisma.venue.findUnique({ where: { id: venueId } });
+      if (!venue) throw new AppError("Venue not found", 404);
+      assertVenuePortalCanPublish(venue);
+
+      const existing = await prisma.venueMenu.findFirst({
+        where: { id: menuId, venueId },
+      });
+      if (!existing) throw new AppError("Menu not found", 404);
+
+      const menu = await prisma.venueMenu.update({
+        where: { id: menuId },
+        data: {
+          name: body.name,
+          description: body.description,
+          dietaryType: body.dietaryType as DietaryPreference | undefined,
+          costPerHead: body.costPerHead,
+          publishStatus: body.publishStatus as MenuPublishStatus | undefined,
+          categories: body.categories as NytoTableType[] | undefined,
+        },
+      });
+      res.json({ ok: true, menu });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+venueRouter.get(
+  "/:venueId/support",
+  requireVenueAccess("params", "venueId"),
+  async (req, res, next) => {
+    try {
+      const venueId = String(req.params.venueId);
+      const tickets = await prisma.supportTicket.findMany({
+        where: { venueId, source: SupportSource.VENUE },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      });
+      res.json({ ok: true, tickets });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+venueRouter.post(
+  "/:venueId/support",
+  requireVenueAccess("params", "venueId"),
+  validateBody(supportCreateSchema),
+  async (req: AuthedRequest, res, next) => {
+    try {
+      const venueId = String(req.params.venueId);
+      const body = req.body as z.infer<typeof supportCreateSchema>;
+      const ticket = await prisma.supportTicket.create({
+        data: {
+          source: SupportSource.VENUE,
+          venueId,
+          staffUserId: req.userId!,
+          subject: body.subject,
+          category: body.category as SupportCategory,
+          message: body.message,
+          status: SupportStatus.OPEN,
+        },
+      });
+      res.status(201).json({ ok: true, ticket });
     } catch (err) {
       next(err);
     }
@@ -170,6 +271,7 @@ venueRouter.get(
   async (req, res, next) => {
     try {
       const venueId = String(req.params.venueId);
+      await expireStalePendingHolds({ venueId });
       const tables = await prisma.supperTable.findMany({
         where: { venueId },
         include: {
@@ -283,6 +385,8 @@ venueRouter.patch(
       const tableId = String(req.params.tableId);
       const body = req.body as z.infer<typeof tablePatchSchema>;
 
+      await expireStalePendingHolds({ tableId });
+
       const existing = await prisma.supperTable.findFirst({
         where: { id: tableId, venueId },
         include: {
@@ -290,7 +394,7 @@ venueRouter.patch(
             where: {
               status: { in: ["CONFIRMED", "ATTENDED", "PENDING_PAYMENT"] },
             },
-            select: { id: true, status: true },
+            select: { id: true, status: true, seatsBooked: true },
           },
         },
       });

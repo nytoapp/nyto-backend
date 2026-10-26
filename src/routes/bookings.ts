@@ -11,12 +11,14 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import {
   PENDING_PAYMENT_TTL_MS,
-  isHoldingStatus,
+  isActivelyHoldingSeat,
   seatsHoldingCapacity,
 } from "../lib/bookingSeats";
 import { cancelBookingAsUser } from "../lib/bookingLifecycle";
 import { captureBookingPayment } from "../lib/captureBookingPayment";
+import { expireStalePendingHolds } from "../lib/expireStalePendingHolds";
 import { moneyFor } from "../lib/pricing";
+import { lockSupperTableForInventory } from "../lib/tableInventoryLock";
 import {
   createRazorpayOrder,
   isRazorpayConfigured,
@@ -54,25 +56,18 @@ const razorpayConfirmSchema = z.object({
 bookingsRouter.use(requireAuth);
 
 async function assertPayableBooking(bookingId: string, userId: string) {
+  await expireStalePendingHolds({ bookingIds: [bookingId] });
   const booking = await prisma.booking.findUnique({
     where: { id: bookingId },
     include: { table: true, payment: true },
   });
   if (!booking) throw new AppError("Booking not found", 404);
   if (booking.userId !== userId) throw new AppError("Forbidden", 403);
+  if (booking.status === BookingStatus.CANCELLED) {
+    throw new AppError("Payment hold expired — create a new booking", 409);
+  }
   if (booking.status !== BookingStatus.PENDING_PAYMENT) {
     throw new AppError("Booking is not awaiting payment");
-  }
-  if (Date.now() - booking.createdAt.getTime() > PENDING_PAYMENT_TTL_MS) {
-    await prisma.booking.update({
-      where: { id: booking.id },
-      data: {
-        status: BookingStatus.CANCELLED,
-        cancelledAt: new Date(),
-        cancelReason: "NYTO",
-      },
-    });
-    throw new AppError("Payment hold expired — create a new booking", 409);
   }
   return booking;
 }
@@ -88,6 +83,7 @@ bookingsRouter.get("/payment-config", async (_req, res) => {
 
 bookingsRouter.get("/me", async (req: AuthedRequest, res, next) => {
   try {
+    await expireStalePendingHolds({ userId: req.userId });
     const bookings = await prisma.booking.findMany({
       where: { userId: req.userId },
       include: {
@@ -108,63 +104,10 @@ bookingsRouter.post(
   async (req: AuthedRequest, res, next) => {
     try {
       const body = req.body as z.infer<typeof createSchema>;
-
-      const table = await prisma.supperTable.findUnique({
-        where: { id: body.tableId },
-        include: {
-          venue: { select: { id: true, isActive: true } },
-          bookings: {
-            select: {
-              seatsBooked: true,
-              status: true,
-              createdAt: true,
-              bookingType: true,
-              user: {
-                select: {
-                  gender: true,
-                  dateOfBirth: true,
-                  interests: true,
-                  socialEnergy: true,
-                  conversationStyle: true,
-                },
-              },
-            },
-          },
-        },
-      });
-      if (!table) throw new AppError("Table not found", 404);
-      if (!table.venue.isActive) {
-        throw new AppError("This venue is not accepting bookings", 403);
-      }
-      if (
-        table.status !== TableStatus.OPEN &&
-        table.status !== TableStatus.MATCHING
-      ) {
-        throw new AppError("This table is not open for booking");
-      }
-      if (table.startsAt <= new Date()) {
-        throw new AppError("This table has already started");
-      }
-      if (new Date() < table.bookingOpensAt) {
-        throw new AppError(
-          `Booking opens ${table.bookingOpensAt.toISOString()}`,
-          403,
-        );
-      }
-
-      const seatsTaken = seatsHoldingCapacity(table.bookings);
-      const seatsLeft = Math.max(table.capacity - seatsTaken, 0);
-      let womenHolding = 0;
-      let menHolding = 0;
-      for (const b of table.bookings) {
-        if (!isHoldingStatus(b.status)) continue;
-        const bucket = classifyGender(b.user.gender);
-        if (bucket === "WOMAN") womenHolding += b.seatsBooked;
-        if (bucket === "MAN") menHolding += b.seatsBooked;
-      }
+      const userId = req.userId!;
 
       const user = await prisma.user.findUnique({
-        where: { id: req.userId! },
+        where: { id: userId },
         select: {
           gender: true,
           dateOfBirth: true,
@@ -174,60 +117,138 @@ bookingsRouter.post(
         },
       });
 
-      try {
-        assertBookingAllowed({
-          tableType: table.tableType,
-          bookingType: body.bookingType,
-          seatsBooked: body.seatsBooked,
-          seatsLeft,
-          userGender: user?.gender,
-          womenHolding,
-          menHolding,
-        });
-        assertSeatingMatch({
-          tableType: table.tableType,
-          me: {
-            dateOfBirth: user?.dateOfBirth,
-            interests: user?.interests,
-            socialEnergy: user?.socialEnergy,
-            conversationStyle: user?.conversationStyle,
-          },
-          peers: table.bookings
-            .filter((b) => isHoldingStatus(b.status))
-            .map((b) => ({
-              dateOfBirth: b.user.dateOfBirth,
-              interests: b.user.interests,
-              socialEnergy: b.user.socialEnergy,
-              conversationStyle: b.user.conversationStyle,
-            })),
-        });
-      } catch (err) {
-        throw new AppError(
-          err instanceof Error ? err.message : "Booking not allowed",
-          400,
-        );
-      }
+      const { booking, money, seatPrice } = await prisma.$transaction(
+        async (tx) => {
+          try {
+            await lockSupperTableForInventory(tx, body.tableId);
+          } catch (err) {
+            if (err instanceof Error && err.message === "TABLE_LOCK_MISS") {
+              throw new AppError("Table not found", 404);
+            }
+            throw err;
+          }
 
-      const money = moneyFor(table.seatPrice, body.seatsBooked);
+          await expireStalePendingHolds({ tableId: body.tableId, tx });
 
-      const booking = await prisma.booking.create({
-        data: {
-          userId: req.userId!,
-          tableId: table.id,
-          bookingType: body.bookingType as BookingType,
-          seatsBooked: body.seatsBooked,
-          status: BookingStatus.PENDING_PAYMENT,
+          const table = await tx.supperTable.findUnique({
+            where: { id: body.tableId },
+            include: {
+              venue: { select: { id: true, isActive: true } },
+              bookings: {
+                select: {
+                  seatsBooked: true,
+                  status: true,
+                  createdAt: true,
+                  bookingType: true,
+                  user: {
+                    select: {
+                      gender: true,
+                      dateOfBirth: true,
+                      interests: true,
+                      socialEnergy: true,
+                      conversationStyle: true,
+                    },
+                  },
+                },
+              },
+            },
+          });
+          if (!table) throw new AppError("Table not found", 404);
+          if (!table.venue.isActive) {
+            throw new AppError("This venue is not accepting bookings", 403);
+          }
+          if (
+            table.status !== TableStatus.OPEN &&
+            table.status !== TableStatus.MATCHING
+          ) {
+            throw new AppError("This table is not open for booking");
+          }
+          if (table.startsAt <= new Date()) {
+            throw new AppError("This table has already started");
+          }
+          if (new Date() < table.bookingOpensAt) {
+            throw new AppError(
+              `Booking opens ${table.bookingOpensAt.toISOString()}`,
+              403,
+            );
+          }
+
+          const seatsTaken = seatsHoldingCapacity(table.bookings);
+          const seatsLeft = Math.max(table.capacity - seatsTaken, 0);
+          let womenHolding = 0;
+          let menHolding = 0;
+          for (const b of table.bookings) {
+            if (!isActivelyHoldingSeat(b)) continue;
+            const bucket = classifyGender(b.user.gender);
+            if (bucket === "WOMAN") womenHolding += b.seatsBooked;
+            if (bucket === "MAN") menHolding += b.seatsBooked;
+          }
+
+          try {
+            assertBookingAllowed({
+              tableType: table.tableType,
+              bookingType: body.bookingType,
+              seatsBooked: body.seatsBooked,
+              seatsLeft,
+              userGender: user?.gender,
+              womenHolding,
+              menHolding,
+            });
+            assertSeatingMatch({
+              tableType: table.tableType,
+              me: {
+                dateOfBirth: user?.dateOfBirth,
+                interests: user?.interests,
+                socialEnergy: user?.socialEnergy,
+                conversationStyle: user?.conversationStyle,
+              },
+              peers: table.bookings
+                .filter((b) => isActivelyHoldingSeat(b))
+                .map((b) => ({
+                  dateOfBirth: b.user.dateOfBirth,
+                  interests: b.user.interests,
+                  socialEnergy: b.user.socialEnergy,
+                  conversationStyle: b.user.conversationStyle,
+                })),
+            });
+          } catch (err) {
+            throw new AppError(
+              err instanceof Error ? err.message : "Booking not allowed",
+              400,
+            );
+          }
+
+          if (body.seatsBooked > seatsLeft) {
+            throw new AppError("Not enough seats left on this table", 409);
+          }
+
+          const pricing = moneyFor(table.seatPrice, body.seatsBooked);
+          const created = await tx.booking.create({
+            data: {
+              userId,
+              tableId: table.id,
+              bookingType: body.bookingType as BookingType,
+              seatsBooked: body.seatsBooked,
+              status: BookingStatus.PENDING_PAYMENT,
+            },
+            include: {
+              table: { include: { venue: true } },
+            },
+          });
+
+          return {
+            booking: created,
+            money: pricing,
+            seatPrice: table.seatPrice,
+          };
         },
-        include: {
-          table: { include: { venue: true } },
-        },
-      });
+      );
 
       res.status(201).json({
         ok: true,
         booking,
         pricing: {
-          seatPrice: table.seatPrice,
+          seatPrice,
           seatsBooked: body.seatsBooked,
           ...money,
         },
@@ -415,6 +436,7 @@ bookingsRouter.post("/:id/cancel", async (req: AuthedRequest, res, next) => {
 bookingsRouter.get("/:id", async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
+    await expireStalePendingHolds({ bookingIds: [id] });
     const booking = await prisma.booking.findUnique({
       where: { id },
       include: {
