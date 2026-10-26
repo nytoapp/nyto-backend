@@ -84,6 +84,50 @@ export function attachChatSocket(httpServer: HttpServer): Server {
       if (tableId) void socket.leave(`table:${tableId}`);
     });
 
+    /** Venue staff door / inventory room — JWT user must be staff on that venue. */
+    socket.on("venue.join", async (raw: unknown, ack?: (res: unknown) => void) => {
+      try {
+        const venueId =
+          typeof raw === "string"
+            ? raw
+            : raw && typeof raw === "object" && "venueId" in raw
+              ? String((raw as { venueId: string }).venueId)
+              : "";
+        if (!venueId) {
+          ack?.({ ok: false, error: "venueId required" });
+          return;
+        }
+        const staff = await prisma.venueStaff.findFirst({
+          where: { userId, venueId, isActive: true },
+        });
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { role: true },
+        });
+        if (!staff && user?.role !== "ADMIN") {
+          ack?.({ ok: false, error: "Forbidden" });
+          return;
+        }
+        await socket.join(`venue:${venueId}`);
+        ack?.({ ok: true, venueId });
+      } catch (err) {
+        ack?.({
+          ok: false,
+          error: err instanceof Error ? err.message : "Join failed",
+        });
+      }
+    });
+
+    socket.on("venue.leave", (raw: unknown) => {
+      const venueId =
+        typeof raw === "string"
+          ? raw
+          : raw && typeof raw === "object" && "venueId" in raw
+            ? String((raw as { venueId: string }).venueId)
+            : "";
+      if (venueId) void socket.leave(`venue:${venueId}`);
+    });
+
     socket.on("dm.join", async (raw: unknown, ack?: (res: unknown) => void) => {
       try {
         const threadId =

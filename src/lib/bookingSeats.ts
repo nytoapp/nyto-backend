@@ -39,3 +39,31 @@ export function seatsHoldingCapacity(
 export function isHoldingStatus(status: BookingStatus): boolean {
   return HOLDING_STATUSES.includes(status);
 }
+
+/**
+ * Same TTL semantics as seatsHoldingCapacity — use for gender mix / matching
+ * so expired pending holds do not skew Singles caps.
+ */
+export function isActivelyHoldingSeat(
+  booking: SeatBookingRow,
+  now = new Date(),
+): boolean {
+  if (
+    booking.status === BookingStatus.CONFIRMED ||
+    booking.status === BookingStatus.ATTENDED
+  ) {
+    return true;
+  }
+  if (booking.status !== BookingStatus.PENDING_PAYMENT) return false;
+  if (!booking.createdAt) return true;
+  return booking.createdAt.getTime() >= now.getTime() - PENDING_PAYMENT_TTL_MS;
+}
+
+/** True when a PENDING_PAYMENT hold has passed its seat TTL. */
+export function isPendingHoldExpired(
+  createdAt: Date | null | undefined,
+  now = new Date(),
+): boolean {
+  if (!createdAt) return false;
+  return createdAt.getTime() < now.getTime() - PENDING_PAYMENT_TTL_MS;
+}

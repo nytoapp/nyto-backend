@@ -141,6 +141,30 @@ enum HostApplicationStatus {
   WITHDRAWN
 }
 
+enum MenuPublishStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum SupportSource {
+  VENUE
+  GUEST
+}
+
+enum SupportCategory {
+  DOOR
+  BOOKING
+  NIGHT
+  PAYMENT
+  OTHER
+}
+
+enum SupportStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+}
+
 model User {
   id                 String             @id @default(cuid())
   phone              String?            @unique
@@ -187,6 +211,8 @@ model User {
   badges             UserBadge[]
   authSessions       AuthSession[]
   venueStaff         VenueStaff[]
+  supportTicketsFiled SupportTicket[] @relation("SupportStaff")
+  supportTicketsGuest SupportTicket[] @relation("SupportGuest")
   hostApplications   HostApplication[]
 
   @@map("users")
@@ -286,10 +312,38 @@ model Venue {
   tables SupperTable[]
   staff  VenueStaff[]
   hostApplications HostApplication[]
+  supportTickets   SupportTicket[]
 
   @@index([city, area])
   @@index([hostedBy, isActive])
   @@map("venues")
+}
+
+/// Venue (or later guest) ops ticket — Contact NYTO ↔ Admin Guest Experience.
+model SupportTicket {
+  id          String          @id @default(cuid())
+  source      SupportSource   @default(VENUE)
+  venueId     String?
+  bookingId   String?
+  /// Guest reporter when source=GUEST.
+  userId      String?
+  /// Venue staff who filed when source=VENUE.
+  staffUserId String?
+  subject     String
+  category    SupportCategory
+  message     String
+  status      SupportStatus   @default(OPEN)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  venue Venue? @relation(fields: [venueId], references: [id], onDelete: SetNull)
+  user  User?  @relation("SupportGuest", fields: [userId], references: [id], onDelete: SetNull)
+  staff User?  @relation("SupportStaff", fields: [staffUserId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([venueId, status])
+  @@index([source, status])
+  @@map("support_tickets")
 }
 
 /// Links a user to a venue they may manage. Tenant scope always comes from here,
@@ -345,14 +399,17 @@ model HostApplication {
 }
 
 model VenueMenu {
-  id           String            @id @default(cuid())
-  venueId      String
-  name         String
-  description  String?
-  dietaryType  DietaryPreference
-  costPerHead  Int
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  id            String             @id @default(cuid())
+  venueId       String
+  name          String
+  /// Courses + notes only. Status/categories live in first-class columns.
+  description   String?
+  dietaryType   DietaryPreference
+  costPerHead   Int
+  publishStatus MenuPublishStatus  @default(DRAFT)
+  categories    NytoTableType[]    @default([])
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
 
   venue  Venue         @relation(fields: [venueId], references: [id], onDelete: Cascade)
   tables SupperTable[]

@@ -7,6 +7,7 @@ import { healthRouter } from "./routes/health";
 import { authRouter } from "./routes/auth";
 import { tablesRouter } from "./routes/tables";
 import { bookingsRouter } from "./routes/bookings";
+import { razorpayWebhookRouter } from "./routes/razorpayWebhook";
 import { verificationRouter } from "./routes/verification";
 import { chatRouter } from "./routes/chat";
 import { directRouter } from "./routes/direct";
@@ -22,6 +23,18 @@ export function createApp() {
 
   app.use(helmet());
   app.use(cors({ origin: env.CORS_ORIGIN === "*" ? true : env.CORS_ORIGIN }));
+  // Webhook needs the raw body for HMAC verification.
+  app.use(
+    "/bookings/razorpay/webhook",
+    express.json({
+      limit: "2mb",
+      verify: (req, _res, buf) => {
+        (req as express.Request & { rawBody?: string }).rawBody =
+          buf.toString("utf8");
+      },
+    }),
+    razorpayWebhookRouter,
+  );
   app.use(express.json({ limit: "2mb" }));
   app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
 

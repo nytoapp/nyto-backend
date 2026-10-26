@@ -323,7 +323,12 @@ async function seed() {
     update: { role: UserRole.ADMIN },
   });
 
-  const partnerVenue = venues.find((v) => v.hostedBy === "PARTNER") ?? venues[2];
+  const partnerVenue =
+    venues.find(
+      (v) => v.hostedBy === "PARTNER" && /Ameerpet/i.test(v.name),
+    ) ??
+    venues.find((v) => v.hostedBy === "PARTNER") ??
+    venues[2];
 
   const venueOwner = await prisma.user.upsert({
     where: { email: "venue@nyto.app" },

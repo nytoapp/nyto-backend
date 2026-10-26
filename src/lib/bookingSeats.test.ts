@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { BookingStatus } from "@prisma/client";
 import {
   PENDING_PAYMENT_TTL_MS,
+  isActivelyHoldingSeat,
+  isPendingHoldExpired,
   seatsHoldingCapacity,
 } from "./bookingSeats";
 import { moneyFor } from "./pricing";
@@ -41,6 +43,30 @@ describe("seatsHoldingCapacity", () => {
         now,
       ),
     ).toBe(2);
+  });
+});
+
+describe("isActivelyHoldingSeat / isPendingHoldExpired", () => {
+  const now = new Date("2026-09-03T12:00:00.000Z");
+
+  it("treats expired pending as not holding", () => {
+    const expired = {
+      seatsBooked: 1,
+      status: BookingStatus.PENDING_PAYMENT,
+      createdAt: new Date(now.getTime() - PENDING_PAYMENT_TTL_MS - 1),
+    };
+    expect(isActivelyHoldingSeat(expired, now)).toBe(false);
+    expect(isPendingHoldExpired(expired.createdAt, now)).toBe(true);
+  });
+
+  it("keeps fresh pending as holding", () => {
+    const fresh = {
+      seatsBooked: 1,
+      status: BookingStatus.PENDING_PAYMENT,
+      createdAt: new Date(now.getTime() - 60_000),
+    };
+    expect(isActivelyHoldingSeat(fresh, now)).toBe(true);
+    expect(isPendingHoldExpired(fresh.createdAt, now)).toBe(false);
   });
 });
 

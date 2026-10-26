@@ -120,14 +120,23 @@ authRouter.post(
 
       const challenge = await issueOtpChallenge(OtpChannel.SMS, normalized.e164);
 
+      let deliveryMode: "provider" | "console" | "skipped_test" = "skipped_test";
+      let otpSent = false;
       // Test destinations short-circuit delivery; real numbers always send.
       if (!challenge.isTestCode) {
-        await sendOtpSms(normalized.e164, normalized.callingCode, challenge.code);
+        const transport = await sendOtpSms(
+          normalized.e164,
+          normalized.callingCode,
+          challenge.code,
+        );
+        deliveryMode = transport === "console" ? "console" : "provider";
+        otpSent = transport !== "console";
       }
 
       res.json({
         ok: true,
-        otpSent: true,
+        otpSent,
+        deliveryMode,
         phone: normalized.e164,
         maskedPhone: maskPhone(normalized.e164),
         expiresAt: challenge.expiresAt.toISOString(),
@@ -174,13 +183,18 @@ authRouter.post(
       }
 
       const challenge = await issueOtpChallenge(OtpChannel.EMAIL, normalized);
+      let deliveryMode: "resend" | "dev_log" | "skipped_test" = "skipped_test";
+      let otpSent = false;
       if (!challenge.isTestCode) {
-        await sendEmailOtp(normalized, challenge.code);
+        const delivery = await sendEmailOtp(normalized, challenge.code);
+        deliveryMode = delivery.mode;
+        otpSent = delivery.delivered;
       }
 
       res.json({
         ok: true,
-        otpSent: true,
+        otpSent,
+        deliveryMode,
         email: normalized,
         maskedEmail: maskEmail(normalized),
         expiresAt: challenge.expiresAt.toISOString(),

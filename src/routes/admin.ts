@@ -5,9 +5,11 @@ import {
   DietaryPreference,
   GenderPreference,
   HostApplicationStatus,
+  MenuPublishStatus,
   NytoTableType,
   PaymentStatus,
   PriceTier,
+  SupportStatus,
   TablePaymentType,
   TableStatus,
   UserRole,
@@ -36,12 +38,19 @@ import {
   refundPaymentAsAdmin,
 } from "../lib/bookingLifecycle";
 import { defaultBookingOpensAt } from "../lib/bookingWindow";
+import { expireStalePendingHolds } from "../lib/expireStalePendingHolds";
 import { genderPreferenceForTableType } from "../lib/tableType";
 import {
   approveHostApplication,
   rejectHostApplication,
 } from "../lib/hostApplications";
 import { findOrCreateEmailUser } from "../lib/identity";
+import {
+  sendAdminInviteEmail,
+  sendHostPortalReadyEmail,
+} from "../lib/email";
+import { notificationFromEmail } from "../lib/emailDelivery";
+import { env } from "../config/env";
 import { getTableChatWindow } from "../lib/tableChat";
 import { assertAdminCanPublish } from "../lib/venueHostedBy";
 import { normalizeEmail } from "../lib/otp";
@@ -244,9 +253,18 @@ const menuCreateSchema = z.object({
   description: z.string().trim().max(500).optional(),
   dietaryType: z.enum(["VEGETARIAN", "NON_VEGETARIAN", "VEGAN"]),
   costPerHead: z.number().int().min(0),
+  publishStatus: z.enum(["DRAFT", "PUBLISHED"]).optional(),
+  categories: z
+    .array(z.enum(["WEEKLY", "WOMEN_LED", "COUPLES", "SINGLES"]))
+    .max(4)
+    .optional(),
 });
 
 const menuPatchSchema = menuCreateSchema.partial();
+
+const supportPatchSchema = z.object({
+  status: z.enum(["OPEN", "IN_REVIEW", "RESOLVED"]),
+});
 
 const tableCreateSchema = z.object({
   menuId: z.string().min(1).optional(),
@@ -580,6 +598,10 @@ adminRouter.post(
           description: body.description,
           dietaryType: body.dietaryType as DietaryPreference,
           costPerHead: body.costPerHead,
+          publishStatus:
+            (body.publishStatus as MenuPublishStatus | undefined) ??
+            MenuPublishStatus.PUBLISHED,
+          categories: (body.categories as NytoTableType[] | undefined) ?? [],
         },
       });
       res.status(201).json({ ok: true, menu });
@@ -609,6 +631,8 @@ adminRouter.patch(
           name: body.name,
           description: body.description,
           dietaryType: body.dietaryType as DietaryPreference | undefined,
+          publishStatus: body.publishStatus as MenuPublishStatus | undefined,
+          categories: body.categories as NytoTableType[] | undefined,
           costPerHead: body.costPerHead,
         },
       });
@@ -922,6 +946,8 @@ adminRouter.get("/bookings", async (req, res, next) => {
     const status =
       typeof req.query.status === "string" ? req.query.status : undefined;
 
+    await expireStalePendingHolds(venueId ? { venueId } : {});
+
     const bookings = await prisma.booking.findMany({
       where: {
         ...(status ? { status: status as never } : {}),
@@ -966,6 +992,7 @@ adminRouter.get("/bookings", async (req, res, next) => {
 adminRouter.get("/bookings/:bookingId", async (req, res, next) => {
   try {
     const bookingId = String(req.params.bookingId);
+    await expireStalePendingHolds({ bookingIds: [bookingId] });
     const booking = await prisma.booking.findUnique({
       where: { id: bookingId },
       include: {
@@ -982,7 +1009,7 @@ adminRouter.get("/bookings/:bookingId", async (req, res, next) => {
           include: {
             venue: true,
             bookings: {
-              select: { seatsBooked: true, status: true },
+              select: { seatsBooked: true, status: true, createdAt: true },
             },
           },
         },
@@ -1079,6 +1106,59 @@ adminRouter.post(
   },
 );
 
+adminRouter.get("/support", async (req, res, next) => {
+  try {
+    const statusRaw =
+      typeof req.query.status === "string" ? req.query.status : undefined;
+    const sourceRaw =
+      typeof req.query.source === "string" ? req.query.source : undefined;
+    const tickets = await prisma.supportTicket.findMany({
+      where: {
+        ...(statusRaw && statusRaw !== "ALL"
+          ? { status: statusRaw as SupportStatus }
+          : {}),
+        ...(sourceRaw && sourceRaw !== "ALL"
+          ? { source: sourceRaw as "VENUE" | "GUEST" }
+          : {}),
+      },
+      include: {
+        venue: { select: { id: true, name: true, area: true, city: true } },
+        staff: {
+          select: { id: true, fullName: true, firstName: true, email: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    res.json({ ok: true, tickets });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.patch(
+  "/support/:id",
+  validateBody(supportPatchSchema),
+  async (req, res, next) => {
+    try {
+      const id = String(req.params.id);
+      const body = req.body as z.infer<typeof supportPatchSchema>;
+      const existing = await prisma.supportTicket.findUnique({ where: { id } });
+      if (!existing) throw new AppError("Ticket not found", 404);
+      const ticket = await prisma.supportTicket.update({
+        where: { id },
+        data: { status: body.status as SupportStatus },
+        include: {
+          venue: { select: { id: true, name: true, area: true, city: true } },
+        },
+      });
+      res.json({ ok: true, ticket });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 adminRouter.get("/host-applications", async (req, res, next) => {
   try {
     const statusRaw =
@@ -1129,7 +1209,33 @@ adminRouter.post(
         adminUserId: req.userId!,
         venueId: body.venueId,
       });
-      res.json({ ok: true, application });
+
+      const portalUrl = env.VENUE_WEB_URL.replace(/\/$/, "");
+      const to =
+        application.contactEmail?.trim() ||
+        application.user.email?.trim() ||
+        null;
+      const venueName =
+        application.venue?.name || application.venueName || "your venue";
+      let delivery = null;
+      if (to) {
+        delivery = await sendHostPortalReadyEmail({
+          to,
+          contactName: application.contactName,
+          venueName,
+          portalUrl,
+        });
+      }
+
+      const notification = notificationFromEmail(
+        delivery,
+        `Approval email sent to ${to}. They sign in at ${portalUrl} with email OTP.`,
+        to
+          ? `Access granted for ${venueName}. No email delivered (mail provider off or failed before send). Tell them to open ${portalUrl} and sign in with ${to} via OTP.`
+          : `Access granted for ${venueName}. No contact email on file — tell the host to sign in at ${portalUrl} with the email on their NYTO account (OTP).`,
+      );
+
+      res.json({ ok: true, application, notification });
     } catch (err) {
       next(err);
     }
@@ -1252,7 +1358,7 @@ adminRouter.get("/guests/:id", async (req, res, next) => {
         },
       },
     });
-    if (!user) throw new AppError(404, "Guest not found");
+    if (!user) throw new AppError("Guest not found", 404);
 
     /** Same table groups the guest sees in the NYTO app (TableMember). */
     const memberships = await prisma.tableMember.findMany({
@@ -1386,6 +1492,18 @@ adminRouter.post(
             },
           });
 
+      const consoleUrl = env.ADMIN_WEB_URL.replace(/\/$/, "");
+      const delivery = await sendAdminInviteEmail({
+        to: email,
+        name,
+        consoleUrl,
+      });
+      const notification = notificationFromEmail(
+        delivery,
+        `Invite email sent to ${email}. They sign in at ${consoleUrl} with OTP.`,
+        `Admin access granted for ${email}. No invite email delivered (mail provider off). They sign in at ${consoleUrl} with email OTP — there is no magic link.`,
+      );
+
       res.status(201).json({
         ok: true,
         member: {
@@ -1395,6 +1513,7 @@ adminRouter.post(
           role: user.role,
           status: existing ? ("ACTIVE" as const) : ("INVITED" as const),
         },
+        notification,
       });
     } catch (err) {
       next(err);
