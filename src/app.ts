@@ -15,6 +15,7 @@ import { adminRouter } from "./routes/admin";
 import { venueRouter } from "./routes/venuePortal";
 import { locationsRouter } from "./routes/locations";
 import { hostApplicationsRouter } from "./routes/hostApplications";
+import { supportRouter } from "./routes/support";
 import { errorHandler } from "./middleware/errorHandler";
 import { notFound } from "./middleware/notFound";
 
@@ -52,6 +53,7 @@ export function createApp() {
   app.use("/venue", venueRouter);
   app.use("/locations", locationsRouter);
   app.use("/host-applications", hostApplicationsRouter);
+  app.use("/support", supportRouter);
 
   app.use(notFound);
   app.use(errorHandler);

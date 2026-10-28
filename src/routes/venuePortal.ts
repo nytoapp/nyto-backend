@@ -128,7 +128,14 @@ const menuPatchSchema = menuCreateSchema.partial();
 
 const supportCreateSchema = z.object({
   subject: z.string().trim().min(1).max(160),
-  category: z.enum(["DOOR", "BOOKING", "NIGHT", "PAYMENT", "OTHER"]),
+  category: z.enum([
+    "DOOR",
+    "BOOKING",
+    "NIGHT",
+    "PAYMENT",
+    "FEEDBACK",
+    "OTHER",
+  ]),
   message: z.string().trim().min(1).max(2000),
 });
 

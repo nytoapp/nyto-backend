@@ -18,6 +18,7 @@ import { cancelBookingAsUser } from "../lib/bookingLifecycle";
 import { captureBookingPayment } from "../lib/captureBookingPayment";
 import { expireStalePendingHolds } from "../lib/expireStalePendingHolds";
 import { moneyFor } from "../lib/pricing";
+import { getBookingReveal } from "../lib/tableReveal";
 import { lockSupperTableForInventory } from "../lib/tableInventoryLock";
 import {
   createRazorpayOrder,
@@ -428,6 +429,19 @@ bookingsRouter.post("/:id/cancel", async (req: AuthedRequest, res, next) => {
     const id = String(req.params.id);
     const booking = await cancelBookingAsUser(id, req.userId!);
     res.json({ ok: true, booking });
+  } catch (err) {
+    next(err);
+  }
+});
+
+bookingsRouter.get("/:id/reveal", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const reveal = await getBookingReveal({
+      bookingId: id,
+      userId: req.userId!,
+    });
+    res.json({ ok: true, reveal });
   } catch (err) {
     next(err);
   }
