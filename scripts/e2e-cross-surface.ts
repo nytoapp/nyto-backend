@@ -281,6 +281,13 @@ async function main() {
   );
   const vMenuId = (vMenu.json.menu as Json).id as string;
 
+  const createdPublish =
+    ((vMenu.json.menu as Json)?.publishStatus as string) || "DRAFT";
+  assert(
+    createdPublish === "DRAFT",
+    `venue menu create should default DRAFT got ${createdPublish}`,
+  );
+
   const vMenuPatch = await api(
     "PATCH",
     `/venue/${venueId}/menus/${vMenuId}`,
@@ -290,6 +297,8 @@ async function main() {
       description: "Partner dish · published\nStatus: Published",
       dietaryType: "VEGETARIAN",
       costPerHead: 525,
+      publishStatus: "PUBLISHED",
+      categories: ["WEEKLY"],
     },
   );
   assert(
@@ -299,6 +308,10 @@ async function main() {
   assert(
     ((vMenuPatch.json.menu as Json)?.costPerHead as number) === 525,
     "menu PATCH did not persist costPerHead",
+  );
+  assert(
+    ((vMenuPatch.json.menu as Json)?.publishStatus as string) === "PUBLISHED",
+    "menu PATCH did not persist publishStatus",
   );
   console.log("✓ Venue menu PATCH (edit/publish draft)");
 
@@ -491,13 +504,308 @@ async function main() {
   assert(refunded.refundedAt != null, "refundedAt missing");
   console.log("✓ Guest paid cancel → payment REFUNDED (CAS ledger)");
 
+  // ── E2) Parallel double paid-cancel — one refund only ──────────────────
+  const casGuest = await ensureGuest();
+  const casBook = await api("POST", "/bookings", casGuest.token, {
+    tableId,
+    bookingType: "SOLO",
+    seatsBooked: 1,
+  });
+  assert(casBook.status === 201, `cas book ${casBook.status}`);
+  const casBookingId = (casBook.json.booking as Json).id as string;
+  await payBooking(casGuest.token, casBookingId);
+  await rewriteCapturedPaymentToStub(casBookingId);
+  const [casA, casB] = await Promise.all([
+    api("POST", `/bookings/${casBookingId}/cancel`, casGuest.token),
+    api("POST", `/bookings/${casBookingId}/cancel`, casGuest.token),
+  ]);
+  const casOk = [casA, casB].filter((r) => r.status === 200).length;
+  const casReject = [casA, casB].filter((r) => r.status >= 400).length;
+  assert(casOk >= 1, `parallel cancel expected ≥1 success got ${casOk}`);
+  assert(
+    casOk + casReject === 2,
+    `parallel cancel unexpected statuses ${casA.status}/${casB.status}`,
+  );
+  const casPay = await prisma.payment.findUnique({
+    where: { bookingId: casBookingId },
+  });
+  assert(casPay?.status === PaymentStatus.REFUNDED, "CAS double cancel not REFUNDED");
+  console.log("✓ Parallel paid cancel → single REFUNDED ledger");
+
+  // ── F) HOLD_EXPIRED frees the seat ─────────────────────────────────────
+  const ttlHold = await api("POST", "/bookings", guest.token, {
+    tableId,
+    bookingType: "SOLO",
+    seatsBooked: 1,
+  });
+  assert(ttlHold.status === 201, `ttl hold ${ttlHold.status}`);
+  const ttlHoldId = (ttlHold.json.booking as Json).id as string;
+  await prisma.booking.update({
+    where: { id: ttlHoldId },
+    data: { createdAt: new Date(Date.now() - 21 * 60 * 1000) },
+  });
+  const afterExpire = await api("GET", `/bookings/${ttlHoldId}`, guest.token);
+  assert(afterExpire.status === 200, `ttl get ${afterExpire.status}`);
+  const expiredBooking = afterExpire.json.booking as Json;
+  assert(
+    expiredBooking.status === "CANCELLED",
+    `expected HOLD expire CANCELLED got ${expiredBooking.status}`,
+  );
+  assert(
+    expiredBooking.cancelReason === "HOLD_EXPIRED",
+    `expected HOLD_EXPIRED got ${expiredBooking.cancelReason}`,
+  );
+  const rebook = await api("POST", "/bookings", guest2.token, {
+    tableId,
+    bookingType: "SOLO",
+    seatsBooked: 1,
+  });
+  assert(
+    rebook.status === 201,
+    `seat not freed after HOLD_EXPIRED ${rebook.status} ${JSON.stringify(rebook.json)}`,
+  );
+  const rebookId = (rebook.json.booking as Json).id as string;
+  await api("POST", `/bookings/${rebookId}/cancel`, guest2.token);
+  console.log("✓ HOLD_EXPIRED cancels hold and frees seat");
+
+  // ── G) Support tickets venue + guest + admin ───────────────────────────
+  const vSupport = await api(
+    "POST",
+    `/venue/${venueId}/support`,
+    venueTokenFresh,
+    {
+      subject: "E2E door stuck",
+      category: "DOOR",
+      message: "Guest code not scanning",
+    },
+  );
+  assert(
+    vSupport.status === 201,
+    `venue support ${vSupport.status} ${JSON.stringify(vSupport.json)}`,
+  );
+  const gSupport = await api("POST", "/support", guest.token, {
+    subject: "E2E guest complaint",
+    category: "BOOKING",
+    message: "Need help with my seat",
+  });
+  assert(
+    gSupport.status === 201,
+    `guest support ${gSupport.status} ${JSON.stringify(gSupport.json)}`,
+  );
+  const gFeedback = await api("POST", "/support", guest.token, {
+    subject: "E2E night was great",
+    category: "FEEDBACK",
+    message: "Loved the table energy",
+  });
+  assert(gFeedback.status === 201, `feedback ${gFeedback.status}`);
+  const adminSupport = await api("GET", "/admin/support", adminToken);
+  assert(adminSupport.status === 200, `admin support ${adminSupport.status}`);
+  const allTickets = (adminSupport.json.tickets as Json[]) ?? [];
+  assert(
+    allTickets.some((t) => t.id === (vSupport.json.ticket as Json).id),
+    "admin missing venue ticket",
+  );
+  assert(
+    allTickets.some((t) => t.id === (gSupport.json.ticket as Json).id),
+    "admin missing guest ticket",
+  );
+  const patchTicket = await api(
+    "PATCH",
+    `/admin/support/${(gSupport.json.ticket as Json).id}`,
+    adminToken,
+    { status: "IN_REVIEW" },
+  );
+  assert(patchTicket.status === 200, `patch support ${patchTicket.status}`);
+  console.log("✓ Support tickets venue + guest → admin inbox");
+
+  // ── H) Underfill cancel (1 paid seat) ──────────────────────────────────
+  const underfillGuest = await ensureGuest();
+  const ufStarts = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+  ufStarts.setHours(20, 0, 0, 0);
+  const ufTable = await prisma.supperTable.create({
+    data: {
+      venueId,
+      menuId: vMenuId,
+      startsAt: ufStarts,
+      bookingOpensAt: new Date(Date.now() - 60_000),
+      priceTier: PriceTier.EVENING,
+      seatPrice: 799,
+      capacity: 6,
+      tableType: NytoTableType.WEEKLY,
+      paymentType: TablePaymentType.ALL_INCLUSIVE,
+      status: TableStatus.OPEN,
+      inclusions: ["Underfill E2E"],
+    },
+  });
+  const ufBook = await api("POST", "/bookings", underfillGuest.token, {
+    tableId: ufTable.id,
+    bookingType: "SOLO",
+    seatsBooked: 1,
+  });
+  assert(ufBook.status === 201, `underfill book ${ufBook.status}`);
+  const ufBookingId = (ufBook.json.booking as Json).id as string;
+  await payBooking(underfillGuest.token, ufBookingId);
+  await rewriteCapturedPaymentToStub(ufBookingId);
+  const ufCancel = await api(
+    "PATCH",
+    `/venue/${venueId}/tables/${ufTable.id}`,
+    venueTokenFresh,
+    { status: "CANCELLED" },
+  );
+  assert(
+    ufCancel.status === 200,
+    `underfill cancel ${ufCancel.status} ${JSON.stringify(ufCancel.json)}`,
+  );
+  assert(
+    ufCancel.json.underfillCancel === true,
+    "expected underfillCancel true",
+  );
+  const ufPay = await prisma.payment.findUnique({
+    where: { bookingId: ufBookingId },
+  });
+  assert(ufPay?.status === PaymentStatus.REFUNDED, "underfill refund missing");
+  console.log("✓ Venue underfill cancel → refunds paid seats");
+
+  // ── I) Admin mark no-show + late check-in ──────────────────────────────
+  const nsGuest = await ensureGuest();
+  const nsStartsFuture = new Date(Date.now() + 2 * 60 * 60 * 1000);
+  const nsTable = await prisma.supperTable.create({
+    data: {
+      venueId,
+      menuId: vMenuId,
+      startsAt: nsStartsFuture,
+      bookingOpensAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+      priceTier: PriceTier.EVENING,
+      seatPrice: 700,
+      capacity: 6,
+      tableType: NytoTableType.WEEKLY,
+      paymentType: TablePaymentType.ALL_INCLUSIVE,
+      status: TableStatus.OPEN,
+      inclusions: ["No-show E2E"],
+    },
+  });
+  const nsBook = await api("POST", "/bookings", nsGuest.token, {
+    tableId: nsTable.id,
+    bookingType: "SOLO",
+    seatsBooked: 1,
+  });
+  assert(
+    nsBook.status === 201,
+    `no-show book ${nsBook.status} ${JSON.stringify(nsBook.json)}`,
+  );
+  const nsBookingId = (nsBook.json.booking as Json).id as string;
+  const nsCode = await payBooking(nsGuest.token, nsBookingId);
+  // Night must have started before admin can mark no-show.
+  await prisma.supperTable.update({
+    where: { id: nsTable.id },
+    data: { startsAt: new Date(Date.now() - 30 * 60 * 1000) },
+  });
+  const nsMark = await api(
+    "POST",
+    `/admin/bookings/${nsBookingId}/no-show`,
+    adminToken,
+  );
+  assert(
+    nsMark.status === 200,
+    `no-show mark ${nsMark.status} ${JSON.stringify(nsMark.json)}`,
+  );
+  assert(
+    ((nsMark.json.booking as Json)?.status as string) === "NO_SHOW",
+    "status not NO_SHOW",
+  );
+  const lateCheckIn = await api(
+    "POST",
+    `/venue/${venueId}/check-in`,
+    venueTokenFresh,
+    { checkInCode: nsCode },
+  );
+  assert(
+    lateCheckIn.status === 200,
+    `late check-in ${lateCheckIn.status} ${JSON.stringify(lateCheckIn.json)}`,
+  );
+  console.log("✓ Admin no-show + late door check-in → ATTENDED");
+
+  // ── J) Reveal payload for paid booking ─────────────────────────────────
+  const revealGuest = await ensureGuest();
+  const revealStarts = new Date(Date.now() + 2 * 60 * 60 * 1000);
+  const revealTable = await prisma.supperTable.create({
+    data: {
+      venueId,
+      menuId: vMenuId,
+      startsAt: revealStarts,
+      bookingOpensAt: new Date(Date.now() - 60_000),
+      priceTier: PriceTier.EVENING,
+      seatPrice: 650,
+      capacity: 6,
+      tableType: NytoTableType.WEEKLY,
+      paymentType: TablePaymentType.ALL_INCLUSIVE,
+      status: TableStatus.OPEN,
+      inclusions: ["Reveal E2E"],
+    },
+  });
+  const revealBook = await api("POST", "/bookings", revealGuest.token, {
+    tableId: revealTable.id,
+    bookingType: "SOLO",
+    seatsBooked: 1,
+  });
+  assert(revealBook.status === 201, `reveal book ${revealBook.status}`);
+  const revealBookingId = (revealBook.json.booking as Json).id as string;
+  await payBooking(revealGuest.token, revealBookingId);
+  const revealRes = await api(
+    "GET",
+    `/bookings/${revealBookingId}/reveal`,
+    revealGuest.token,
+  );
+  assert(
+    revealRes.status === 200,
+    `reveal ${revealRes.status} ${JSON.stringify(revealRes.json)}`,
+  );
+  assert(
+    (revealRes.json.reveal as Json)?.revealed === true,
+    "reveal should be open inside 24h window",
+  );
+  assert(
+    ((revealRes.json.reveal as Json)?.venue as Json)?.name,
+    "reveal missing venue",
+  );
+  console.log("✓ Guest table reveal returns live venue payload");
+
   // cleanup lock fixtures + e2e guests
-  await prisma.booking.deleteMany({ where: { tableId: lockTable.id } });
-  await prisma.supperTable.delete({ where: { id: lockTable.id } });
+  await prisma.booking.deleteMany({
+    where: {
+      tableId: {
+        in: [
+          lockTable.id,
+          nsTable.id,
+          revealTable.id,
+          ufTable.id,
+          vTableId,
+          tableId,
+        ],
+      },
+    },
+  });
+  await prisma.supperTable.deleteMany({
+    where: {
+      id: { in: [lockTable.id, nsTable.id, revealTable.id, ufTable.id] },
+    },
+  });
   await prisma.venue.delete({ where: { id: lockVenue.id } });
   await prisma.authSession.deleteMany({
     where: {
-      userId: { in: [u1.id, u2.id, guest.id, guest2.id, paidGuest.id] },
+      userId: {
+        in: [
+          u1.id,
+          u2.id,
+          guest.id,
+          guest2.id,
+          paidGuest.id,
+          casGuest.id,
+          underfillGuest.id,
+          nsGuest.id,
+          revealGuest.id,
+        ],
+      },
     },
   });
   await prisma.user.deleteMany({

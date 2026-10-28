@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "SupportCategory" ADD VALUE IF NOT EXISTS 'FEEDBACK';

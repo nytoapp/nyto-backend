@@ -9,6 +9,7 @@ import {
   NytoTableType,
   PaymentStatus,
   PriceTier,
+  SupportCategory,
   SupportStatus,
   TablePaymentType,
   TableStatus,
@@ -35,6 +36,7 @@ import { validateBody } from "../middleware/validate";
 import {
   cancelBookingAsAdmin,
   cancelTableAsAdmin,
+  markNoShowAsAdmin,
   refundPaymentAsAdmin,
 } from "../lib/bookingLifecycle";
 import { defaultBookingOpensAt } from "../lib/bookingWindow";
@@ -1106,12 +1108,27 @@ adminRouter.post(
   },
 );
 
+adminRouter.post(
+  "/bookings/:bookingId/no-show",
+  async (req, res, next) => {
+    try {
+      const bookingId = String(req.params.bookingId);
+      const booking = await markNoShowAsAdmin(bookingId);
+      res.json({ ok: true, booking });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 adminRouter.get("/support", async (req, res, next) => {
   try {
     const statusRaw =
       typeof req.query.status === "string" ? req.query.status : undefined;
     const sourceRaw =
       typeof req.query.source === "string" ? req.query.source : undefined;
+    const categoryRaw =
+      typeof req.query.category === "string" ? req.query.category : undefined;
     const tickets = await prisma.supportTicket.findMany({
       where: {
         ...(statusRaw && statusRaw !== "ALL"
@@ -1120,11 +1137,23 @@ adminRouter.get("/support", async (req, res, next) => {
         ...(sourceRaw && sourceRaw !== "ALL"
           ? { source: sourceRaw as "VENUE" | "GUEST" }
           : {}),
+        ...(categoryRaw && categoryRaw !== "ALL"
+          ? { category: categoryRaw as SupportCategory }
+          : {}),
       },
       include: {
         venue: { select: { id: true, name: true, area: true, city: true } },
         staff: {
           select: { id: true, fullName: true, firstName: true, email: true },
+        },
+        user: {
+          select: {
+            id: true,
+            fullName: true,
+            firstName: true,
+            email: true,
+            phone: true,
+          },
         },
       },
       orderBy: { createdAt: "desc" },

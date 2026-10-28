@@ -348,7 +348,8 @@ export async function checkInByCode(input: {
   }
   if (
     booking.status !== BookingStatus.CONFIRMED &&
-    booking.status !== BookingStatus.ATTENDED
+    booking.status !== BookingStatus.ATTENDED &&
+    booking.status !== BookingStatus.NO_SHOW
   ) {
     throw new AppError("Booking is not paid / confirmed");
   }
@@ -403,4 +404,55 @@ export async function checkInByCode(input: {
   });
 
   return { alreadyCheckedIn: false, booking: updated };
+}
+
+/**
+ * Admin marks a confirmed guest as no-show after the night has started.
+ * No automatic refund — paid seat was held. Late check-in can still recover.
+ */
+export async function markNoShowAsAdmin(bookingId: string): Promise<unknown> {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    include: { table: true, payment: true },
+  });
+  if (!booking) throw new AppError("Booking not found", 404);
+
+  if (booking.status === BookingStatus.NO_SHOW) {
+    return prisma.booking.findUniqueOrThrow({
+      where: { id: bookingId },
+      include: {
+        table: { include: { venue: true } },
+        payment: true,
+        user: {
+          select: { id: true, fullName: true, phone: true, email: true },
+        },
+      },
+    });
+  }
+
+  if (booking.status !== BookingStatus.CONFIRMED) {
+    throw new AppError("Only confirmed seats can be marked no-show", 409);
+  }
+  if (booking.table.startsAt > new Date()) {
+    throw new AppError("Cannot mark no-show before the night starts", 409);
+  }
+
+  const updated = await prisma.booking.update({
+    where: { id: bookingId },
+    data: {
+      status: BookingStatus.NO_SHOW,
+      cancelReason: "NO_SHOW",
+      cancelledAt: new Date(),
+    },
+    include: {
+      table: { include: { venue: true } },
+      payment: true,
+      user: {
+        select: { id: true, fullName: true, phone: true, email: true },
+      },
+    },
+  });
+
+  await refreshTableOpenStatus(booking.tableId);
+  return updated;
 }
