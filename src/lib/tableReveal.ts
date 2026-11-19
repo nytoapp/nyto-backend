@@ -23,8 +23,8 @@ function courseLines(description: string | null | undefined): string[] {
 }
 
 /**
- * Guest reveal payload for a paid booking. Lazily marks the table REVEALED
- * once inside the 24h window.
+ * Guest reveal payload for a paid booking. Stamps revealedAt inside the 24h
+ * window and leaves the night OPEN or MATCHING so empty seats stay bookable.
  */
 export async function getBookingReveal(input: {
   bookingId: string;
@@ -80,13 +80,12 @@ export async function getBookingReveal(input: {
     eligible &&
     table.status !== TableStatus.CANCELLED &&
     table.status !== TableStatus.COMPLETED &&
-    (!table.revealedAt || table.status !== TableStatus.REVEALED)
+    !table.revealedAt
   ) {
     table = await prisma.supperTable.update({
       where: { id: table.id },
       data: {
-        status: TableStatus.REVEALED,
-        revealedAt: table.revealedAt ?? new Date(),
+        revealedAt: new Date(),
       },
       include: {
         venue: true,

@@ -15,6 +15,7 @@ import { generateCheckInCode } from "./checkInCode";
 import { expireStalePendingHolds } from "./expireStalePendingHolds";
 import { moneyFor } from "./pricing";
 import { lockSupperTableForInventory } from "./tableInventoryLock";
+import { isOpenForNewSeats } from "./tableInventoryStatus";
 import { AppError } from "../middleware/errorHandler";
 
 type Tx = Prisma.TransactionClient;
@@ -83,10 +84,7 @@ export async function captureBookingPayment(opts: {
     );
   }
 
-  if (
-    booking.table.status !== TableStatus.OPEN &&
-    booking.table.status !== TableStatus.MATCHING
-  ) {
+  if (!isOpenForNewSeats(booking.table.status)) {
     throw new AppError("This table is not open for booking", 409);
   }
 
@@ -120,10 +118,7 @@ export async function captureBookingPayment(opts: {
         409,
       );
     }
-    if (
-      fresh.table.status !== TableStatus.OPEN &&
-      fresh.table.status !== TableStatus.MATCHING
-    ) {
+    if (!isOpenForNewSeats(fresh.table.status)) {
       throw new AppError("This table is not open for booking", 409);
     }
 

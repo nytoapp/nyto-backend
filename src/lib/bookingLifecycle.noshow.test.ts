@@ -7,6 +7,10 @@ const { prismaMock } = vi.hoisted(() => {
     booking: {
       findUnique: vi.fn(),
       findUniqueOrThrow: vi.fn(),
+      findMany: vi.fn(),
+      update: vi.fn(),
+    },
+    user: {
       update: vi.fn(),
     },
     supperTable: {
@@ -31,6 +35,8 @@ import { markNoShowAsAdmin } from "./bookingLifecycle";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prismaMock.booking.findMany.mockResolvedValue([]);
+  prismaMock.user.update.mockResolvedValue({});
 });
 
 describe("markNoShowAsAdmin", () => {
@@ -57,11 +63,13 @@ describe("markNoShowAsAdmin", () => {
   });
 
   it("marks confirmed after start", async () => {
+    const started = new Date(Date.now() - 60_000);
     prismaMock.booking.findUnique.mockResolvedValue({
       id: "b1",
+      userId: "u1",
       status: BookingStatus.CONFIRMED,
       tableId: "t1",
-      table: { startsAt: new Date(Date.now() - 60_000), venueId: "v1" },
+      table: { startsAt: started, venueId: "v1" },
       payment: null,
     });
     prismaMock.booking.update.mockResolvedValue({
@@ -69,9 +77,20 @@ describe("markNoShowAsAdmin", () => {
       status: BookingStatus.NO_SHOW,
     });
     prismaMock.supperTable.findUnique.mockResolvedValue(null);
+    prismaMock.booking.findMany.mockResolvedValue([
+      {
+        status: BookingStatus.NO_SHOW,
+        tableId: "t1",
+        table: { startsAt: started },
+      },
+    ]);
 
     const result = await markNoShowAsAdmin("b1");
     expect(result).toMatchObject({ status: BookingStatus.NO_SHOW });
+    expect(prismaMock.user.update).toHaveBeenCalledWith({
+      where: { id: "u1" },
+      data: { attendanceCount: 0, currentStreak: 0 },
+    });
     expect(prismaMock.booking.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "b1" },
