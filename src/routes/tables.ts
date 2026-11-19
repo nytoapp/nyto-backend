@@ -28,6 +28,8 @@ import {
   matchingTransparency,
 } from "../lib/tableBookingRules";
 import { parseTableType } from "../lib/tableType";
+import { OPEN_FOR_SEATS } from "../lib/tableInventoryStatus";
+import { optionalAuth, type AuthedRequest } from "../middleware/auth";
 
 export const tablesRouter = Router();
 
@@ -167,7 +169,7 @@ function formatTable(
   };
 }
 
-tablesRouter.get("/", async (req, res, next) => {
+tablesRouter.get("/", optionalAuth, async (req: AuthedRequest, res, next) => {
   try {
     const filter = String(req.query.filter ?? "this_week");
     const city =
@@ -211,9 +213,35 @@ tablesRouter.get("/", async (req, res, next) => {
         : null;
 
     const now = new Date();
+    const heldRows = req.userId
+      ? await prisma.booking.findMany({
+          where: {
+            userId: req.userId,
+            status: {
+              in: [BookingStatus.CONFIRMED, BookingStatus.ATTENDED],
+            },
+            table: { startsAt: { gte: now } },
+          },
+          select: {
+            tableId: true,
+            status: true,
+            createdAt: true,
+            seatsBooked: true,
+          },
+        })
+      : [];
+    const hideTableIds = [
+      ...new Set(
+        heldRows
+          .filter((row) => isActivelyHoldingSeat(row, now))
+          .map((row) => row.tableId),
+      ),
+    ];
+
     const tables = await prisma.supperTable.findMany({
       where: {
-        status: { in: [TableStatus.OPEN, TableStatus.MATCHING] },
+        status: { in: OPEN_FOR_SEATS },
+        ...(hideTableIds.length > 0 ? { id: { notIn: hideTableIds } } : {}),
         startsAt: { gte: now },
         ...(filter === "daytime" ? { priceTier: PriceTier.DAYTIME } : {}),
         ...(filter === "evening" ? { priceTier: PriceTier.EVENING } : {}),

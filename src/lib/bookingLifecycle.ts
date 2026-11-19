@@ -1,10 +1,12 @@
 import {
   BookingStatus,
   PaymentStatus,
+  Prisma,
   TableStatus,
 } from "@prisma/client";
 import { prisma } from "./prisma";
 import { AppError } from "../middleware/errorHandler";
+import { attendanceSnapshot } from "./attendance";
 import { seatsHoldingCapacity } from "./bookingSeats";
 import {
   emitBookingCancelled,
@@ -12,6 +14,7 @@ import {
   emitInventorySeats,
 } from "./opsEvents";
 import { claimAndRefundPayment } from "./paymentRefund";
+import { isOpenForNewSeats } from "./tableInventoryStatus";
 
 async function refreshTableOpenStatus(tableId: string): Promise<void> {
   const table = await prisma.supperTable.findUnique({
@@ -23,12 +26,7 @@ async function refreshTableOpenStatus(tableId: string): Promise<void> {
     },
   });
   if (!table) return;
-  if (
-    table.status !== TableStatus.MATCHING &&
-    table.status !== TableStatus.OPEN
-  ) {
-    return;
-  }
+  if (!isOpenForNewSeats(table.status)) return;
 
   const taken = seatsHoldingCapacity(
     table.bookings.filter(
@@ -354,6 +352,7 @@ export async function checkInByCode(input: {
     throw new AppError("Booking is not paid / confirmed");
   }
   if (booking.status === BookingStatus.ATTENDED && booking.checkedInAt) {
+    await syncUserAttendance(booking.userId);
     return { alreadyCheckedIn: true, booking };
   }
 
@@ -392,6 +391,7 @@ export async function checkInByCode(input: {
       },
     });
 
+    await syncUserAttendance(booking.userId, tx);
     return next;
   });
 
@@ -454,5 +454,34 @@ export async function markNoShowAsAdmin(bookingId: string): Promise<unknown> {
   });
 
   await refreshTableOpenStatus(booking.tableId);
+  await syncUserAttendance(booking.userId);
   return updated;
+}
+
+async function syncUserAttendance(
+  userId: string,
+  db: Prisma.TransactionClient | typeof prisma = prisma,
+) {
+  const rows = await db.booking.findMany({
+    where: {
+      userId,
+      status: { in: [BookingStatus.ATTENDED, BookingStatus.NO_SHOW] },
+    },
+    select: {
+      status: true,
+      tableId: true,
+      table: { select: { startsAt: true } },
+    },
+  });
+  const snapshot = attendanceSnapshot(
+    rows.map((row) => ({
+      status: row.status,
+      tableId: row.tableId,
+      startsAt: row.table.startsAt,
+    })),
+  );
+  await db.user.update({
+    where: { id: userId },
+    data: snapshot,
+  });
 }

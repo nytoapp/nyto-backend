@@ -5,7 +5,6 @@ import {
   PaymentMethod,
   PaymentProvider,
   PaymentStatus,
-  TableStatus,
 } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
@@ -35,6 +34,7 @@ import {
   classifyGender,
 } from "../lib/tableBookingRules";
 import { assertSeatingMatch } from "../lib/matching";
+import { isOpenForNewSeats } from "../lib/tableInventoryStatus";
 
 export const bookingsRouter = Router();
 
@@ -158,10 +158,7 @@ bookingsRouter.post(
           if (!table.venue.isActive) {
             throw new AppError("This venue is not accepting bookings", 403);
           }
-          if (
-            table.status !== TableStatus.OPEN &&
-            table.status !== TableStatus.MATCHING
-          ) {
+          if (!isOpenForNewSeats(table.status)) {
             throw new AppError("This table is not open for booking");
           }
           if (table.startsAt <= new Date()) {

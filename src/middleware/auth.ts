@@ -25,6 +25,19 @@ function bearerToken(req: Request): string | undefined {
  * Verifies JWT + active session, then attaches platform role and venue tenancy
  * from the database so demotions take effect immediately.
  */
+/**
+ * Same session check as requireAuth, but a missing token stays anonymous.
+ * A token that is present and bad still fails, so the client can refresh.
+ */
+export async function optionalAuth(
+  req: AuthedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  if (!bearerToken(req)) return next();
+  return requireAuth(req, res, next);
+}
+
 export async function requireAuth(
   req: AuthedRequest,
   _res: Response,
